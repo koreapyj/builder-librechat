@@ -1,0 +1,90 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs b/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs
+index 27f1361..e0284a1
+--- a/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs
+@@ -1561,7 +1561,8 @@ var StandardGraph = class StandardGraph extends Graph {
+ 				}
+ 				const beforeHandoffCue = transformed;
+ 				transformed = trackProviderMessageOrigins(beforeHandoffCue, require_handoffCue.appendInstructionlessHandoffCue(beforeHandoffCue, callConfig));
+-				if (require_llm.isAnthropicLike(provider, clientOptions)) {
++				// builder-librechat: only append the handoff cue for real multi-agent graphs.
++				if (require_llm.isAnthropicLike(provider, clientOptions) && this.agentContexts.size > 1) {
+ 					const before = transformed;
+ 					transformed = trackProviderMessageOrigins(before, require_handoffCue.appendPredecessorHandoffCue(before, (message) => this.isRunProducedMessage(message)));
+ 				}
+diff --git a/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs b/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs
+index 29e8a77..edab2f4
+--- a/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs
+@@ -184,7 +184,8 @@ function prepareProviderRequest({ model, messages, provider, context, config, ma
+ 	const isRunProduced = context?.isRunProducedMessage;
+ 	const modelId = resolveServingModelId(model);
+ 	const handoffGrounded = require_handoffCue.appendInstructionlessHandoffCue(annotated, config);
+-	const cued = require_llm.isAnthropicLike(provider, { model: modelId }) ? require_handoffCue.appendPredecessorHandoffCue(handoffGrounded, isRunProduced == null ? void 0 : (message) => isRunProduced.call(context, message)) : require_handoffCue.removePredecessorHandoffCue(handoffGrounded);
++	// builder-librechat: only append the handoff cue for real multi-agent graphs.
++	const cued = require_llm.isAnthropicLike(provider, { model: modelId }) && (context?.agentContexts?.size ?? 0) > 1 ? require_handoffCue.appendPredecessorHandoffCue(handoffGrounded, isRunProduced == null ? void 0 : (message) => isRunProduced.call(context, message)) : require_handoffCue.removePredecessorHandoffCue(handoffGrounded);
+ 	const preparedMessages = require_providerRegistry.providerRequiresStrictAlternation(provider) ? require_alternation.coalesceAdjacentUserTurns(cued) : cued;
+ 	const request = {
+ 		model,
+diff --git a/node_modules/@librechat/agents/dist/cjs/tools/ToolNode.cjs b/node_modules/@librechat/agents/dist/cjs/tools/ToolNode.cjs
+index 21030d9..fe0c924
+--- a/node_modules/@librechat/agents/dist/cjs/tools/ToolNode.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/tools/ToolNode.cjs
+@@ -2379,8 +2379,10 @@ var ToolNode = class extends require_run.RunnableCallable {
+ 	}
+ };
+ function areToolCallsInvoked(message, invokedToolIds) {
+-	if (!invokedToolIds || invokedToolIds.size === 0) return false;
+-	return message.tool_calls?.every((toolCall) => toolCall.id != null && invokedToolIds.has(toolCall.id)) ?? false;
++	// builder-librechat: provider-executed server tool calls (srvtoolu_*) always count as invoked; an empty set must not short-circuit.
++	const toolCalls = message.tool_calls;
++	if (toolCalls == null || toolCalls.length === 0) return false;
++	return toolCalls.every((toolCall) => toolCall.id != null && (toolCall.id.startsWith("srvtoolu_") || (invokedToolIds?.has(toolCall.id) ?? false)));
+ }
+ function sanitizeInvalidToolUseBlocks(content, promotedCalls) {
+ 	if (!Array.isArray(content)) return content;
+diff --git a/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs b/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs
+index 6f7f188..c95f8ea
+--- a/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs
++++ b/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs
+@@ -1561,7 +1561,8 @@ var StandardGraph = class StandardGraph extends Graph {
+ 				}
+ 				const beforeHandoffCue = transformed;
+ 				transformed = trackProviderMessageOrigins(beforeHandoffCue, appendInstructionlessHandoffCue(beforeHandoffCue, callConfig));
+-				if (isAnthropicLike(provider, clientOptions)) {
++				// builder-librechat: only append the handoff cue for real multi-agent graphs.
++				if (isAnthropicLike(provider, clientOptions) && this.agentContexts.size > 1) {
+ 					const before = transformed;
+ 					transformed = trackProviderMessageOrigins(before, appendPredecessorHandoffCue(before, (message) => this.isRunProducedMessage(message)));
+ 				}
+diff --git a/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs b/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs
+index 788b5b5..a166dcb
+--- a/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs
++++ b/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs
+@@ -184,7 +184,8 @@ function prepareProviderRequest({ model, messages, provider, context, config, ma
+ 	const isRunProduced = context?.isRunProducedMessage;
+ 	const modelId = resolveServingModelId(model);
+ 	const handoffGrounded = appendInstructionlessHandoffCue(annotated, config);
+-	const cued = isAnthropicLike(provider, { model: modelId }) ? appendPredecessorHandoffCue(handoffGrounded, isRunProduced == null ? void 0 : (message) => isRunProduced.call(context, message)) : removePredecessorHandoffCue(handoffGrounded);
++	// builder-librechat: only append the handoff cue for real multi-agent graphs.
++	const cued = isAnthropicLike(provider, { model: modelId }) && (context?.agentContexts?.size ?? 0) > 1 ? appendPredecessorHandoffCue(handoffGrounded, isRunProduced == null ? void 0 : (message) => isRunProduced.call(context, message)) : removePredecessorHandoffCue(handoffGrounded);
+ 	const preparedMessages = providerRequiresStrictAlternation(provider) ? coalesceAdjacentUserTurns(cued) : cued;
+ 	const request = {
+ 		model,
+diff --git a/node_modules/@librechat/agents/dist/esm/tools/ToolNode.mjs b/node_modules/@librechat/agents/dist/esm/tools/ToolNode.mjs
+index 912629e..74468d3
+--- a/node_modules/@librechat/agents/dist/esm/tools/ToolNode.mjs
++++ b/node_modules/@librechat/agents/dist/esm/tools/ToolNode.mjs
+@@ -2378,8 +2378,10 @@ var ToolNode = class extends RunnableCallable {
+ 	}
+ };
+ function areToolCallsInvoked(message, invokedToolIds) {
+-	if (!invokedToolIds || invokedToolIds.size === 0) return false;
+-	return message.tool_calls?.every((toolCall) => toolCall.id != null && invokedToolIds.has(toolCall.id)) ?? false;
++	// builder-librechat: provider-executed server tool calls (srvtoolu_*) always count as invoked; an empty set must not short-circuit.
++	const toolCalls = message.tool_calls;
++	if (toolCalls == null || toolCalls.length === 0) return false;
++	return toolCalls.every((toolCall) => toolCall.id != null && (toolCall.id.startsWith("srvtoolu_") || (invokedToolIds?.has(toolCall.id) ?? false)));
+ }
+ function sanitizeInvalidToolUseBlocks(content, promotedCalls) {
+ 	if (!Array.isArray(content)) return content;

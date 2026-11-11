@@ -5,3 +5,5 @@
 # Local patch-authoring workspace (not committed; see Makefile).
 /src/
 /.pc/
+/.pkgwork/
+/.work/

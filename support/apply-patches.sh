@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 #
-# Strictly apply the quilt series in patches/ to a LibreChat checkout.
+# Apply both patch tiers to a LibreChat checkout.
 #
 #   support/apply-patches.sh <librechat-src-dir>
 #
-# Patches are pushed with --fuzz=0: a patch that needs fuzz or rejects fails the
-# run, so drift against a new upstream tag surfaces as a CI failure instead of a
-# silently mis-applied patch. An empty series is a no-op.
-# Used by CI; the Makefile's `prepare` target applies the same way.
+# 1. patches/      quilt series against LibreChat source, pushed with --fuzz=0:
+#                  a patch that needs fuzz or rejects fails the run, so drift
+#                  against a new upstream tag surfaces as a CI failure instead
+#                  of a silently mis-applied patch. An empty series is a no-op.
+# 2. pkg-patches/  patch-package patches for npm dependencies. Staged into
+#                  <src>/pkg-patches/ (always created, possibly empty) and
+#                  applied inside the Docker build right after `npm ci`
+#                  (see patches/9001-docker-apply-pkg-patches.patch).
+#
+# Used by CI and by the Makefile's `prepare` target.
 
 set -euo pipefail
 
@@ -22,17 +28,25 @@ src="$(cd "$1" && pwd)"
 export QUILTRC="${root}/.quiltrc"
 export QUILT_PATCHES="${root}/patches"
 
-if ! grep -qvE '^[[:space:]]*(#|$)' "${QUILT_PATCHES}/series" 2>/dev/null; then
-    echo "patches/series is empty -- building stock upstream."
-    exit 0
+if grep -qvE '^[[:space:]]*(#|$)' "${QUILT_PATCHES}/series" 2>/dev/null; then
+    rc=0
+    (cd "${src}" && quilt push -a --fuzz=0) || rc=$?
+    # quilt exits 2 when there is nothing left to push (all patches already applied).
+    if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 2 ]; then
+        echo "error: patch series failed to apply cleanly (fuzz=0) -- run 'make refresh'." >&2
+        exit "${rc}"
+    fi
+    (cd "${src}" && quilt applied)
+else
+    echo "patches/series is empty -- no LibreChat source patches."
 fi
 
-cd "${src}"
-rc=0
-quilt push -a --fuzz=0 || rc=$?
-# quilt exits 2 when there is nothing left to push (all patches already applied).
-if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 2 ]; then
-    echo "error: patch series failed to apply cleanly (fuzz=0) -- run 'make refresh'." >&2
-    exit "${rc}"
-fi
-quilt applied
+rm -rf "${src}/pkg-patches"
+mkdir -p "${src}/pkg-patches"
+count=0
+for p in "${root}"/pkg-patches/*.patch; do
+    [ -e "${p}" ] || continue
+    cp "${p}" "${src}/pkg-patches/"
+    count=$((count + 1))
+done
+echo "Staged ${count} patch-package patch(es) into ${src}/pkg-patches/."

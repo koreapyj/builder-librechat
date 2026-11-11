@@ -15,11 +15,24 @@ export QUILTRC="$PWD/.quiltrc"
 cd src
 export QUILT_PATCHES=../patches
 quilt push -a                         # apply the existing series
-quilt new 0001-my-change.patch
+quilt new 0004-my-change.patch        # see "Numbering" below
 quilt add api/server/index.js         # before editing!
 quilt edit api/server/index.js        # ... make changes ...
 quilt refresh
 ```
+
+## Numbering
+
+The number range says what kind of patch it is (and therefore what to do with it when
+upstream changes). Within a range, number sequentially; `series` lists patches in
+ascending order.
+
+| Range | Kind |
+|---|---|
+| `0001`-`0999` | Standalone fixes: self-contained, could go upstream; drop once upstream fixes it. |
+| `1000`-`1999` | Other patches that fit none of the ranges below. |
+| `6000`-`6999` | Depends on `pkg-patches/` (meaningless or broken without the matching patch-package patches; add/remove them together). |
+| `9000`-`9999` | Local-only or local policy (builder infrastructure, behaviour we choose to differ from upstream). |
 
 ## Strict application (fuzz = 0)
 

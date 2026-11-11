@@ -1,0 +1,29 @@
+# Test image for running LibreChat jest suites against a (patched) source tree.
+#
+# Built once from a prepared checkout (`make test-image`, context = src/): installs
+# dependencies, applies the staged pkg-patches/ and builds the workspace packages.
+# `make test TREE=<dir> CMD=<cmd>` then copies a source tree over /app (keeping
+# node_modules and built dist/) and runs CMD, so many trees can be tested without
+# repeating `npm ci`. Local-only; not used by CI.
+FROM node:24.16.0-alpine
+
+RUN apk add --no-cache python3 git
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+COPY api/package.json ./api/package.json
+COPY client/package.json ./client/package.json
+COPY packages/data-provider/package.json ./packages/data-provider/package.json
+COPY packages/data-schemas/package.json ./packages/data-schemas/package.json
+COPY packages/api/package.json ./packages/api/package.json
+COPY packages/client/package.json ./packages/client/package.json
+
+RUN npm ci --no-audit --no-fund
+
+COPY pkg-patches ./pkg-patches
+RUN npx --yes patch-package@8.0.1 --error-on-fail --patch-dir pkg-patches
+
+COPY . .
+
+RUN npm run build:packages

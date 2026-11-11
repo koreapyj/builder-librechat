@@ -4,7 +4,9 @@ name: librechat-smoke
 
 services:
   mongodb:
-    image: mongo:8.0
+    # MongoDB 8.x/9.x refuse to start on Linux kernels 6.19-7.0.13 (SERVER-121912),
+    # which CI runners may use; 7.0 runs on all kernels and is enough for a smoke test.
+    image: mongo:7.0
     command: mongod --noauth
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]

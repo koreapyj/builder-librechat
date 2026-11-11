@@ -1,0 +1,262 @@
+Fetch models correctly for custom endpoints with provider: anthropic
+
+loadConfigModels did not pass the endpoint's provider to fetchModels, so a
+custom Anthropic-format endpoint got a Bearer header and `<baseURL>/models`.
+Pass the provider; for anthropic use `<baseURL>/v1/models?limit=1000` with
+x-api-key/anthropic-version headers. Validate the response shape and log
+status/content-type instead of throwing a TypeError on non-JSON bodies.
+
+--- a/packages/api/src/endpoints/models.ts
++++ b/packages/api/src/endpoints/models.ts
+@@ -41,6 +41,8 @@ export interface FetchModelsParams {
+   name?: string;
+   /** Whether directEndpoint was configured */
+   direct?: boolean;
++  /** Custom endpoint provider (e.g. 'anthropic' for Anthropic-compatible gateways) */
++  provider?: string;
+   /** Whether to fetch from Azure */
+   azure?: boolean;
+   /** Whether to send user ID as query parameter */
+@@ -158,6 +160,7 @@ export async function fetchModels({
+   baseURLIsUserProvided = false,
+   allowedAddresses,
+   name = EModelEndpoint.openAI,
++  provider,
+   direct = false,
+   azure = false,
+   userIdQuery = false,
+@@ -254,7 +257,9 @@ export async function fetchModels({
+       timeout: 5000,
+     };
+ 
+-    if (name === EModelEndpoint.anthropic) {
++    const isAnthropicCustom = provider === EModelEndpoint.anthropic && name !== EModelEndpoint.anthropic;
++
++    if (name === EModelEndpoint.anthropic || isAnthropicCustom) {
+       // Keep configured custom headers (e.g. gateway metadata) while the
+       // provider-managed auth/version headers stay authoritative.
+       options.headers = {
+@@ -279,7 +284,16 @@ export async function fetchModels({
+       options.headers['OpenAI-Organization'] = process.env.OPENAI_ORGANIZATION;
+     }
+ 
+-    const url = new URL(`${(baseURL ?? '').replace(/\/+$/, '')}${azure ? '' : '/models'}`);
++    let urlString = `${(baseURL ?? '').replace(/\/+$/, '')}${azure ? '' : '/models'}`;
++    if (isAnthropicCustom && !azure) {
++      const base = (baseURL ?? '').replace(/\/+$/, '');
++      urlString = `${base}${base.endsWith('/v1') ? '' : '/v1'}/models`;
++    }
++    const url = new URL(urlString);
++    if (isAnthropicCustom && !azure) {
++      // Anthropic's default page size is 20
++      url.searchParams.append('limit', '1000');
++    }
+     if (user && userIdQuery) {
+       url.searchParams.append('user', user);
+     }
+@@ -289,6 +303,13 @@ export async function fetchModels({
+ 
+     const input = res.data;
+ 
++    if (!Array.isArray(input?.data)) {
++      logger.error(
++        `Failed to fetch models from ${azure ? 'Azure ' : ''}${name} API: unexpected response shape (status: ${res.status}, content-type: ${res.headers?.['content-type']})`,
++      );
++      return models;
++    }
++
+     const validationResult = inputSchema.safeParse(input);
+     if (validationResult.success && createTokenConfig) {
+       const endpointTokenConfig = processModelData(input);
+--- a/packages/api/src/endpoints/config/models.ts
++++ b/packages/api/src/endpoints/config/models.ts
+@@ -181,6 +181,7 @@ export function createLoadConfigModels(d
+           uniqueKeyToTokenKey[uniqueKey] = tokenKey;
+           fetchPromisesMap[uniqueKey] = fetchModels({
+             name,
++            provider: endpoint.provider,
+             apiKey: API_KEY,
+             baseURL: BASE_URL,
+             baseURLIsUserProvided: false,
+@@ -218,6 +219,7 @@ export function createLoadConfigModels(d
+               }
+               return fetchModels({
+                 name,
++                provider: endpoint.provider,
+                 apiKey: resolvedApiKey,
+                 baseURL: resolvedBaseURL,
+                 baseURLIsUserProvided,
+--- a/packages/api/src/endpoints/models.spec.ts
++++ b/packages/api/src/endpoints/models.spec.ts
+@@ -1,4 +1,5 @@
+ import axios from 'axios';
++import { logger } from '@librechat/data-schemas';
+ import { Time, EModelEndpoint, defaultModels, AuthType } from 'librechat-data-provider';
+ import {
+   fetchModels,
+@@ -1104,3 +1105,98 @@ describe('fetchModels caching behavior',
+     expect(mockCacheSet).toHaveBeenCalled();
+   });
+ });
++
++describe('fetchModels with provider anthropic (custom endpoint)', () => {
++  beforeEach(() => {
++    mockedAxios.get.mockReset().mockResolvedValue({
++      data: { data: [{ id: 'claude-a' }, { id: 'claude-b' }] },
++    });
++    (logger.error as jest.Mock).mockClear();
++  });
++
++  it('requests <base>/v1/models?limit=1000 with Anthropic headers', async () => {
++    const models = await fetchModels({
++      apiKey: 'ant-key',
++      baseURL: 'https://gw.example.com/anthropic/',
++      name: 'GatewayAnt',
++      provider: 'anthropic',
++    });
++
++    expect(models).toEqual(['claude-a', 'claude-b']);
++    expect(mockedAxios.get).toHaveBeenCalledWith(
++      'https://gw.example.com/anthropic/v1/models?limit=1000',
++      expect.objectContaining({
++        headers: expect.objectContaining({
++          'x-api-key': 'ant-key',
++          'anthropic-version': expect.any(String),
++        }),
++      }),
++    );
++    const headers = mockedAxios.get.mock.calls[0][1]?.headers as Record<string, string>;
++    expect(headers.Authorization).toBeUndefined();
++  });
++
++  it('does not double /v1 when baseURL already ends with it', async () => {
++    await fetchModels({
++      apiKey: 'ant-key',
++      baseURL: 'https://gw.example.com/anthropic/v1',
++      name: 'GatewayAnt',
++      provider: 'anthropic',
++    });
++
++    expect(mockedAxios.get).toHaveBeenCalledWith(
++      'https://gw.example.com/anthropic/v1/models?limit=1000',
++      expect.any(Object),
++    );
++  });
++
++  it('keeps userIdQuery alongside limit', async () => {
++    await fetchModels({
++      user: 'user123',
++      apiKey: 'ant-key',
++      baseURL: 'https://gw.example.com/anthropic',
++      name: 'GatewayAnt',
++      provider: 'anthropic',
++      userIdQuery: true,
++    });
++
++    expect(mockedAxios.get).toHaveBeenCalledWith(
++      'https://gw.example.com/anthropic/v1/models?limit=1000&user=user123',
++      expect.any(Object),
++    );
++  });
++
++  it('returns an empty list and logs an error for a non-array (HTML) response', async () => {
++    mockedAxios.get.mockResolvedValue({
++      status: 200,
++      headers: { 'content-type': 'text/html' },
++      data: '<html>not found</html>',
++    });
++
++    const models = await fetchModels({
++      apiKey: 'ant-key',
++      baseURL: 'https://gw.example.com/anthropic',
++      name: 'GatewayAnt',
++      provider: 'anthropic',
++    });
++
++    expect(models).toEqual([]);
++    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('status: 200'));
++    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('text/html'));
++    expect(logAxiosError).not.toHaveBeenCalled();
++  });
++
++  it('leaves the built-in anthropic endpoint URL unchanged', async () => {
++    await fetchModels({
++      apiKey: 'ant-key',
++      baseURL: 'https://api.anthropic.com/v1',
++      name: EModelEndpoint.anthropic,
++      provider: 'anthropic',
++    });
++
++    expect(mockedAxios.get).toHaveBeenCalledWith(
++      'https://api.anthropic.com/v1/models',
++      expect.any(Object),
++    );
++  });
++});
+--- a/packages/api/src/endpoints/config/models.spec.ts
++++ b/packages/api/src/endpoints/config/models.spec.ts
+@@ -297,3 +297,64 @@ describe('createLoadConfigModels – in-
+     expect(fetchModels).toHaveBeenCalledTimes(1);
+   });
+ });
++
++describe('createLoadConfigModels – provider passthrough', () => {
++  const fetchModels = jest.fn().mockResolvedValue([]);
++  const req = { user: { id: 'user-1' }, config: undefined } as unknown as ServerRequest;
++
++  beforeEach(() => {
++    fetchModels.mockReset().mockResolvedValue([]);
++  });
++
++  it('passes endpoint.provider to fetchModels for shared-key endpoints', async () => {
++    const loadConfigModels = createLoadConfigModels({
++      getAppConfig: jest.fn().mockResolvedValue({
++        endpoints: {
++          [EModelEndpoint.custom]: [
++            {
++              name: 'GatewayAnt',
++              provider: 'anthropic',
++              baseURL: 'https://gw.example.com/anthropic',
++              apiKey: 'sk-test',
++              models: { fetch: true },
++            },
++          ],
++        },
++      }),
++      getUserKeyValues: jest.fn(),
++      fetchModels,
++    });
++
++    await loadConfigModels(req);
++
++    expect(fetchModels).toHaveBeenCalledWith(
++      expect.objectContaining({ name: 'GatewayAnt', provider: 'anthropic' }),
++    );
++  });
++
++  it('passes endpoint.provider to fetchModels for user-key endpoints', async () => {
++    const loadConfigModels = createLoadConfigModels({
++      getAppConfig: jest.fn().mockResolvedValue({
++        endpoints: {
++          [EModelEndpoint.custom]: [
++            {
++              name: 'GatewayAnt',
++              provider: 'anthropic',
++              baseURL: 'https://gw.example.com/anthropic',
++              apiKey: AuthType.USER_PROVIDED,
++              models: { fetch: true },
++            },
++          ],
++        },
++      }),
++      getUserKeyValues: jest.fn().mockResolvedValue({ apiKey: 'sk-user-key' }),
++      fetchModels,
++    });
++
++    await loadConfigModels(req);
++
++    expect(fetchModels).toHaveBeenCalledWith(
++      expect.objectContaining({ name: 'GatewayAnt', provider: 'anthropic' }),
++    );
++  });
++});

@@ -1,0 +1,207 @@
+Apply summarization.reserveRatio exactly once
+
+LibreChat applied reserveRatio when computing the agent's maxContextTokens and
+@librechat/agents applied it again in pruning (its own default 0.05 when unset).
+Compute base * (1 - reserveRatio) once here (capped by a user/spec value, default
+ratio 0.05) and pass reserveRatio 0 to the library.
+
+--- a/packages/api/src/agents/run.ts
++++ b/packages/api/src/agents/run.ts
+@@ -422,6 +422,7 @@ type RunAgent = Omit<Agent, 'tools'> & {
+   azureOptions?: t.AzureOptions;
+   tools?: GenericTool[];
+   maxContextTokens?: number;
++  userMaxContextTokens?: number;
+   /** Pre-ratio context budget from initializeAgent. */
+   baseContextTokens?: number;
+   useLegacyContent?: boolean;
+@@ -1492,20 +1493,30 @@ function shapeSummarizationConfig(
+  */
+ const MIN_SUMMARIZATION_CONTEXT_TOKENS = 1024;
+ 
++/** Reserve ratio used when summarization.reserveRatio is unset or invalid. */
++const DEFAULT_RESERVE_RATIO = 0.05;
++
+ /**
+- * Applies `reserveRatio` against the pre-ratio base context budget, falling
+- * back to the pre-computed `maxContextTokens` from initializeAgent.
++ * Single place where the context reserve is applied: `baseContextTokens`
++ * (window minus output reserve) times `(1 - reserveRatio)`, capped by the
++ * user/spec `maxContextTokens` when one was supplied. The library is told to
++ * apply no reserve of its own (see `reserveRatio: 0` on summarizationConfig).
+  */
+ function computeEffectiveMaxContextTokens(
+   reserveRatio: number | undefined,
+   baseContextTokens: number | undefined,
+   maxContextTokens: number | undefined,
++  userMaxContextTokens: number | undefined,
+ ): number | undefined {
+-  if (reserveRatio == null || reserveRatio <= 0 || reserveRatio >= 1 || baseContextTokens == null) {
++  if (baseContextTokens == null) {
+     return maxContextTokens;
+   }
+-  const ratioComputed = Math.max(1024, Math.round(baseContextTokens * (1 - reserveRatio)));
+-  return Math.min(maxContextTokens ?? ratioComputed, ratioComputed);
++  const ratio =
++    reserveRatio != null && reserveRatio >= 0 && reserveRatio < 1
++      ? reserveRatio
++      : DEFAULT_RESERVE_RATIO;
++  const ratioComputed = Math.max(1024, Math.round(baseContextTokens * (1 - ratio)));
++  return Math.min(userMaxContextTokens ?? ratioComputed, ratioComputed);
+ }
+ 
+ type CallbackClientOptions = {
+@@ -2520,6 +2531,7 @@ export async function createRun({
+       summarization.reserveRatio,
+       agent.baseContextTokens,
+       agent.maxContextTokens,
++      agent.userMaxContextTokens,
+     );
+ 
+     const summarizationViable =
+@@ -2554,7 +2566,8 @@ export async function createRun({
+       discoveredTools:
+         !isSubagent && discoveredTools.size > 0 ? Array.from(discoveredTools) : undefined,
+       summarizationEnabled: summarization.enabled && summarizationViable,
+-      summarizationConfig: summarization.config,
++      /** reserveRatio 0: the reserve is already applied once in effectiveMaxContextTokens. */
++      summarizationConfig: { ...summarization.config, reserveRatio: 0 },
+       ...(!isSubagent && compactionSemanticIndex != null ? { compactionSemanticIndex } : {}),
+       initialSummary: isSubagent ? undefined : initialSummary,
+       contextPruningConfig: summarization.contextPruning,
+--- a/packages/api/src/agents/initialize.ts
++++ b/packages/api/src/agents/initialize.ts
+@@ -626,6 +626,8 @@ export type InitializedAgent = Agent & {
+   toolContextMap: Record<string, unknown>;
+   dynamicToolContextMap?: Record<string, unknown>;
+   maxContextTokens: number;
++  /** User/spec-supplied maxContextTokens before any default is computed; undefined when none was set. */
++  userMaxContextTokens?: number;
+   /** Pre-ratio context budget (agentMaxContextNum - maxOutputTokensNum). Used by createRun to apply a configurable reserve ratio. */
+   baseContextTokens?: number;
+   useLegacyContent: boolean;
+@@ -2543,6 +2545,8 @@ export async function initializeAgent(
+       maxContextTokens != null && maxContextTokens > 0
+         ? maxContextTokens
+         : Math.max(1024, Math.round(baseContextTokens * (1 - DEFAULT_RESERVE_RATIO))),
++    userMaxContextTokens:
++      maxContextTokens != null && maxContextTokens > 0 ? maxContextTokens : undefined,
+     primedCodeFiles,
+     endpointTokenConfig: options.endpointTokenConfig,
+   };
+--- a/packages/api/src/agents/__tests__/run-summarization.test.ts
++++ b/packages/api/src/agents/__tests__/run-summarization.test.ts
+@@ -556,35 +556,75 @@ describe('reserveRatio', () => {
+ 
+   it('never exceeds user-configured maxContextTokens even when ratio computes higher', async () => {
+     const agents = await callAndCapture({
+-      agents: [makeAgent({ baseContextTokens: 200_000, maxContextTokens: 50_000 })],
++      agents: [
++        makeAgent({ baseContextTokens: 200_000, maxContextTokens: 50_000, userMaxContextTokens: 50_000 }),
++      ],
+       summarizationConfig: { reserveRatio: 0.03, provider: 'anthropic', model: 'claude' },
+     });
+     // Math.round(200000 * 0.97) = 194000, but min(50000, 194000) = 50000
+     expect(agents[0].maxContextTokens).toBe(50_000);
+   });
+ 
+-  it('falls back to maxContextTokens when ratio is not set', async () => {
++  // The default 0.05 ratio is applied once on the base budget (previously the
++  // pre-computed maxContextTokens was returned as-is when no ratio was set).
++  it('applies the default 0.05 ratio once when ratio is not set', async () => {
+     const agents = await callAndCapture({
+       agents: [makeAgent({ maxContextTokens: 100_000, baseContextTokens: 200_000 })],
+       summarizationConfig: { provider: 'anthropic', model: 'claude' },
+     });
+-    expect(agents[0].maxContextTokens).toBe(100_000);
++    expect(agents[0].maxContextTokens).toBe(190_000);
++    expect((agents[0].summarizationConfig as { reserveRatio: number }).reserveRatio).toBe(0);
+   });
+ 
+-  it('falls back to maxContextTokens when ratio is 0', async () => {
++  it('applies no reserve when ratio is 0', async () => {
+     const agents = await callAndCapture({
+       agents: [makeAgent({ maxContextTokens: 100_000, baseContextTokens: 200_000 })],
+       summarizationConfig: { reserveRatio: 0, provider: 'anthropic', model: 'claude' },
+     });
+-    expect(agents[0].maxContextTokens).toBe(100_000);
++    expect(agents[0].maxContextTokens).toBe(200_000);
+   });
+ 
+-  it('falls back to maxContextTokens when ratio is 1', async () => {
++  it('uses the default ratio when ratio is 1 (invalid)', async () => {
+     const agents = await callAndCapture({
+       agents: [makeAgent({ maxContextTokens: 100_000, baseContextTokens: 200_000 })],
+       summarizationConfig: { reserveRatio: 1, provider: 'anthropic', model: 'claude' },
+     });
+-    expect(agents[0].maxContextTokens).toBe(100_000);
++    expect(agents[0].maxContextTokens).toBe(190_000);
++  });
++
++  it('applies the reserve ratio once with a spec value and tells the library to add none', async () => {
++    const agents = await callAndCapture({
++      agents: [
++        makeAgent({
++          baseContextTokens: 800_000 - 100_000,
++          maxContextTokens: 800_000,
++          userMaxContextTokens: 800_000,
++        }),
++      ],
++      summarizationConfig: { reserveRatio: 0.02, provider: 'anthropic', model: 'claude' },
++    });
++    expect(agents[0].maxContextTokens).toBe(686_000);
++    expect((agents[0].summarizationConfig as { reserveRatio: number }).reserveRatio).toBe(0);
++  });
++
++  it('uses the configured ratio (not the 0.95 default) without a spec value', async () => {
++    const agents = await callAndCapture({
++      agents: [
++        makeAgent({
++          baseContextTokens: 500_000 - 100_000,
++          maxContextTokens: Math.round((500_000 - 100_000) * 0.95),
++        }),
++      ],
++      summarizationConfig: { reserveRatio: 0.02, provider: 'anthropic', model: 'claude' },
++    });
++    expect(agents[0].maxContextTokens).toBe(392_000);
++  });
++
++  it('passes reserveRatio 0 to the library even when no summarization config is given', async () => {
++    const agents = await callAndCapture({
++      agents: [makeAgent({ baseContextTokens: 200_000, maxContextTokens: 190_000 })],
++    });
++    expect(agents[0].summarizationConfig).toMatchObject({ reserveRatio: 0 });
+   });
+ 
+   it('falls back to maxContextTokens when baseContextTokens is undefined', async () => {
+@@ -729,7 +769,8 @@ describe('summarizationConfig field pass
+     expect(config.parameters).toEqual({ temperature: 0.2 });
+     expect(config.prompt).toBe('Summarize this conversation');
+     expect(config.updatePrompt).toBe('Update the existing summary with new messages');
+-    expect(config.reserveRatio).toBe(0.1);
++    // The reserve is applied once by LibreChat; the library always gets 0.
++    expect(config.reserveRatio).toBe(0);
+     expect(config.maxSummaryTokens).toBe(4096);
+     expect(config.retainRecent).toEqual({ turns: 5, tokens: 40000 });
+   });
+@@ -2045,8 +2086,18 @@ describe('multi-agent + per-agent overri
+   it('different agents get different effectiveMaxContextTokens', async () => {
+     const agents = await callAndCapture({
+       agents: [
+-        makeAgent({ id: 'agent_1', baseContextTokens: 200_000, maxContextTokens: 100_000 }),
+-        makeAgent({ id: 'agent_2', baseContextTokens: 100_000, maxContextTokens: 50_000 }),
++        makeAgent({
++          id: 'agent_1',
++          baseContextTokens: 200_000,
++          maxContextTokens: 100_000,
++          userMaxContextTokens: 100_000,
++        }),
++        makeAgent({
++          id: 'agent_2',
++          baseContextTokens: 100_000,
++          maxContextTokens: 50_000,
++          userMaxContextTokens: 50_000,
++        }),
+       ],
+       summarizationConfig: {
+         reserveRatio: 0.1,

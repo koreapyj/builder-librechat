@@ -1,0 +1,208 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+index 9745dbd..c695990
+--- a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+@@ -787,6 +787,34 @@ function formatAssistantMessage(message, options) {
+ 				const { output, args: _args, ..._tool_call } = part.tool_call;
+ 				if (_tool_call.name == null || _tool_call.name === "" && (output == null || output === "")) continue;
+ 				if (options?.provider === "anthropic" && typeof _tool_call.id === "string" && _tool_call.id.startsWith("srvtoolu_")) {
++					// builder-librechat: restore a persisted server tool call (stored JSON output) as a server_tool_use + web_search_tool_result pair
++					if (!serverToolResultIds.has(_tool_call.id) && !emittedServerToolUseIds.has(_tool_call.id) && !pendingServerToolUses.has(_tool_call.id) && output != null && output !== "") {
++						let storedResults;
++						try {
++							storedResults = typeof output === "string" ? JSON.parse(output) : output;
++						} catch {
++							storedResults = void 0;
++						}
++						if (storedResults != null && typeof storedResults === "object" && require_toolResultTypes.hasStructurallyValidAnthropicWebSearchResultContent({
++							tool_use_id: _tool_call.id,
++							content: storedResults
++						})) {
++							currentContent.push({
++								type: "server_tool_use",
++								id: _tool_call.id,
++								name: _tool_call.name,
++								input: parseServerToolInput(_args)
++							}, {
++								type: "web_search_tool_result",
++								tool_use_id: _tool_call.id,
++								content: storedResults
++							});
++							appendCurrentContentProvenance(sourcePartIndices, "model", true);
++							appendCurrentContentProvenance(sourcePartIndices, "model", true);
++							emittedServerToolUseIds.add(_tool_call.id);
++							continue;
++						}
++					}
+ 					if (!serverToolResultIds.has(_tool_call.id) && options.preserveUnpairedServerToolUses !== true) continue;
+ 					if (emittedServerToolUseIds.has(_tool_call.id) || pendingServerToolUses.has(_tool_call.id)) continue;
+ 					const serverToolInput = parseServerToolInput(_args);
+diff --git a/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs b/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs
+index 2f30cfa..74b4d37
+--- a/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs
+@@ -23,7 +23,21 @@ async function handleToolCallChunks({ graph, stepKey, toolCallChunks, metadata,
+ 	}
+ 	const _stepId = graph.getStepIdByKey(stepKey);
+ 	const tool_calls = prevStepId && prevRunStep && prevRunStep.type === "message_creation" ? [] : void 0;
++	// builder-librechat: accumulate streamed input JSON of server tool calls (srvtoolu_*) so it can be persisted with the result
++	const srvToolState = graph._srvToolArgs ??= {
++		byIndex: /* @__PURE__ */ new Map(),
++		byId: /* @__PURE__ */ new Map()
++	};
+ 	for (const toolCallChunk of toolCallChunks) {
++		if (typeof toolCallChunk.id === "string" && toolCallChunk.id !== "") {
++			if (toolCallChunk.id.startsWith("srvtoolu_")) {
++				srvToolState.byIndex.set(toolCallChunk.index, toolCallChunk.id);
++				srvToolState.byId.set(toolCallChunk.id, typeof toolCallChunk.args === "string" ? toolCallChunk.args : "");
++			} else srvToolState.byIndex.delete(toolCallChunk.index);
++		} else if (typeof toolCallChunk.args === "string" && toolCallChunk.args !== "") {
++			const srvId = srvToolState.byIndex.get(toolCallChunk.index);
++			if (srvId != null) srvToolState.byId.set(srvId, (srvToolState.byId.get(srvId) ?? "") + toolCallChunk.args);
++		}
+ 		if (toolCallChunk.name === "") toolCallChunk.name = void 0;
+ 		if (toolCallChunk.id === "") toolCallChunk.id = void 0;
+ 		else if (tool_calls != null && toolCallChunk.id != null && toolCallChunk.name != null) tool_calls.push({
+@@ -163,6 +177,38 @@ async function handleAnthropicSearchResults({ contentPart, toolCall, metadata, g
+ 	await graph.handlerRegistry?.getHandler("on_tool_end")?.handle("on_tool_end", toolEndData, metadata, graph);
+ 	if (graph.invokedToolIds == null) graph.invokedToolIds = /* @__PURE__ */ new Set();
+ 	graph.invokedToolIds.add(toolCall.id);
++	// builder-librechat: persist the query (args) and the raw search results (JSON string output) so later turns can resend them
++	try {
++		const stepId = graph.toolCallStepIds.get(toolCall.id);
++		const runStep = stepId != null ? graph.getRunStep(stepId) : void 0;
++		const completedHandler = graph.handlerRegistry?.getHandler("on_run_step_completed");
++		if (stepId != null && runStep != null && completedHandler != null) {
++			const persistedResults = contentPart.content.filter((r) => r != null && r.type === "web_search_result").map((r) => {
++				const persisted = {
++					type: r.type,
++					url: r.url,
++					title: r.title,
++					encrypted_content: r.encrypted_content
++				};
++				if (r.page_age !== void 0) persisted.page_age = r.page_age;
++				return persisted;
++			});
++			await completedHandler.handle("on_run_step_completed", { result: {
++				id: stepId,
++				index: runStep.index,
++				type: "tool_call",
++				tool_call: {
++					id: toolCall.id,
++					name,
++					args: graph._srvToolArgs?.byId.get(toolCall.id) ?? "",
++					output: JSON.stringify(persistedResults),
++					progress: 1
++				}
++			} }, metadata, graph);
++		}
++	} catch (e) {
++		console.warn("Failed to dispatch run step completion for server tool call", e);
++	}
+ }
+ //#endregion
+ exports.handleServerToolResult = handleServerToolResult;
+diff --git a/node_modules/@librechat/agents/dist/esm/messages/format.mjs b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+index 86e8d40..23e89cf
+--- a/node_modules/@librechat/agents/dist/esm/messages/format.mjs
++++ b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+@@ -787,6 +787,34 @@ function formatAssistantMessage(message, options) {
+ 				const { output, args: _args, ..._tool_call } = part.tool_call;
+ 				if (_tool_call.name == null || _tool_call.name === "" && (output == null || output === "")) continue;
+ 				if (options?.provider === "anthropic" && typeof _tool_call.id === "string" && _tool_call.id.startsWith("srvtoolu_")) {
++					// builder-librechat: restore a persisted server tool call (stored JSON output) as a server_tool_use + web_search_tool_result pair
++					if (!serverToolResultIds.has(_tool_call.id) && !emittedServerToolUseIds.has(_tool_call.id) && !pendingServerToolUses.has(_tool_call.id) && output != null && output !== "") {
++						let storedResults;
++						try {
++							storedResults = typeof output === "string" ? JSON.parse(output) : output;
++						} catch {
++							storedResults = void 0;
++						}
++						if (storedResults != null && typeof storedResults === "object" && hasStructurallyValidAnthropicWebSearchResultContent({
++							tool_use_id: _tool_call.id,
++							content: storedResults
++						})) {
++							currentContent.push({
++								type: "server_tool_use",
++								id: _tool_call.id,
++								name: _tool_call.name,
++								input: parseServerToolInput(_args)
++							}, {
++								type: "web_search_tool_result",
++								tool_use_id: _tool_call.id,
++								content: storedResults
++							});
++							appendCurrentContentProvenance(sourcePartIndices, "model", true);
++							appendCurrentContentProvenance(sourcePartIndices, "model", true);
++							emittedServerToolUseIds.add(_tool_call.id);
++							continue;
++						}
++					}
+ 					if (!serverToolResultIds.has(_tool_call.id) && options.preserveUnpairedServerToolUses !== true) continue;
+ 					if (emittedServerToolUseIds.has(_tool_call.id) || pendingServerToolUses.has(_tool_call.id)) continue;
+ 					const serverToolInput = parseServerToolInput(_args);
+diff --git a/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs b/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs
+index a2c0aac..1cbaa87
+--- a/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs
++++ b/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs
+@@ -23,7 +23,21 @@ async function handleToolCallChunks({ graph, stepKey, toolCallChunks, metadata,
+ 	}
+ 	const _stepId = graph.getStepIdByKey(stepKey);
+ 	const tool_calls = prevStepId && prevRunStep && prevRunStep.type === "message_creation" ? [] : void 0;
++	// builder-librechat: accumulate streamed input JSON of server tool calls (srvtoolu_*) so it can be persisted with the result
++	const srvToolState = graph._srvToolArgs ??= {
++		byIndex: /* @__PURE__ */ new Map(),
++		byId: /* @__PURE__ */ new Map()
++	};
+ 	for (const toolCallChunk of toolCallChunks) {
++		if (typeof toolCallChunk.id === "string" && toolCallChunk.id !== "") {
++			if (toolCallChunk.id.startsWith("srvtoolu_")) {
++				srvToolState.byIndex.set(toolCallChunk.index, toolCallChunk.id);
++				srvToolState.byId.set(toolCallChunk.id, typeof toolCallChunk.args === "string" ? toolCallChunk.args : "");
++			} else srvToolState.byIndex.delete(toolCallChunk.index);
++		} else if (typeof toolCallChunk.args === "string" && toolCallChunk.args !== "") {
++			const srvId = srvToolState.byIndex.get(toolCallChunk.index);
++			if (srvId != null) srvToolState.byId.set(srvId, (srvToolState.byId.get(srvId) ?? "") + toolCallChunk.args);
++		}
+ 		if (toolCallChunk.name === "") toolCallChunk.name = void 0;
+ 		if (toolCallChunk.id === "") toolCallChunk.id = void 0;
+ 		else if (tool_calls != null && toolCallChunk.id != null && toolCallChunk.name != null) tool_calls.push({
+@@ -163,6 +177,38 @@ async function handleAnthropicSearchResults({ contentPart, toolCall, metadata, g
+ 	await graph.handlerRegistry?.getHandler("on_tool_end")?.handle("on_tool_end", toolEndData, metadata, graph);
+ 	if (graph.invokedToolIds == null) graph.invokedToolIds = /* @__PURE__ */ new Set();
+ 	graph.invokedToolIds.add(toolCall.id);
++	// builder-librechat: persist the query (args) and the raw search results (JSON string output) so later turns can resend them
++	try {
++		const stepId = graph.toolCallStepIds.get(toolCall.id);
++		const runStep = stepId != null ? graph.getRunStep(stepId) : void 0;
++		const completedHandler = graph.handlerRegistry?.getHandler("on_run_step_completed");
++		if (stepId != null && runStep != null && completedHandler != null) {
++			const persistedResults = contentPart.content.filter((r) => r != null && r.type === "web_search_result").map((r) => {
++				const persisted = {
++					type: r.type,
++					url: r.url,
++					title: r.title,
++					encrypted_content: r.encrypted_content
++				};
++				if (r.page_age !== void 0) persisted.page_age = r.page_age;
++				return persisted;
++			});
++			await completedHandler.handle("on_run_step_completed", { result: {
++				id: stepId,
++				index: runStep.index,
++				type: "tool_call",
++				tool_call: {
++					id: toolCall.id,
++					name,
++					args: graph._srvToolArgs?.byId.get(toolCall.id) ?? "",
++					output: JSON.stringify(persistedResults),
++					progress: 1
++				}
++			} }, metadata, graph);
++		}
++	} catch (e) {
++		console.warn("Failed to dispatch run step completion for server tool call", e);
++	}
+ }
+ //#endregion
+ export { handleServerToolResult, handleToolCallChunks, handleToolCalls, toolResultTypes };

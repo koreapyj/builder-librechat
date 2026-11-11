@@ -18,8 +18,19 @@ DOCKER_BUILD_ARGS ?=
 # quilt environment used inside $(SRC)/: our patches/ dir is the quilt patch dir.
 QUILT_ENV := QUILTRC=$(QUILTRC) QUILT_PATCHES=$(CURDIR)/$(PATCHES)
 
+# patch-package authoring workspace and target package.
+PKGWORK ?= .pkgwork
+PKG     ?= @librechat/agents
+APPEND  ?=
+
+# jest test image (built from $(SRC)/) and the tree/command `make test` runs.
+TEST_IMAGE ?= librechat-test:local
+TREE       ?= $(SRC)
+CMD        ?= npm run test:api
+
 .DEFAULT_GOAL := help
-.PHONY: help prepare-src prepare build smoke run refresh clean clean-image
+.PHONY: help prepare-src prepare build smoke run refresh clean clean-image \
+        pkg-prepare pkg-update test-image test
 
 help:
 	@echo 'Local patch-authoring / test-build workflow (not used by CI).'
@@ -33,11 +44,19 @@ help:
 	@echo '  run                boot $(IMAGE) with MongoDB in the foreground (http://localhost:3080)'
 	@echo '  refresh            re-push every patch with fuzz allowed and quilt-refresh it'
 	@echo '                     against the current $(SRC)/ (use after moving to a new LC_REF)'
-	@echo '  clean              remove $(SRC)/'
-	@echo '  clean-image        remove $(IMAGE)'
+	@echo '  pkg-prepare        install the locked $(PKG) into $(PKGWORK)/ and apply pkg-patches/'
+	@echo '  pkg-update [APPEND=name]'
+	@echo '                     write $(PKGWORK)/node_modules/$(PKG) changes into pkg-patches/'
+	@echo '                     (APPEND adds a new patch to the sequence)'
+	@echo '  test-image         build the jest image $(TEST_IMAGE) from a prepared $(SRC)/'
+	@echo '  test [TREE=dir] [CMD=...]'
+	@echo '                     copy TREE (default $(SRC)) over the test image and run CMD'
+	@echo '                     (default: $(CMD))'
+	@echo '  clean              remove $(SRC)/ and $(PKGWORK)/'
+	@echo '  clean-image        remove $(IMAGE) and $(TEST_IMAGE)'
 	@echo
 	@echo 'Variables: LC_REF (default: newest stable tag), LC_REPO, IMAGE (default $(IMAGE)),'
-	@echo '           DOCKER_BUILD_ARGS'
+	@echo '           DOCKER_BUILD_ARGS, PKG, PKGWORK, TEST_IMAGE, TREE, CMD'
 	@echo
 	@echo 'Patch authoring:  make clean prepare QUILT=1  ->  quilt new/add/edit/refresh (in $(SRC)/)'
 	@echo 'New upstream tag: make clean prepare-src LC_REF=vX.Y.Z  ->  make refresh'
@@ -92,8 +111,29 @@ refresh:
 	done; \
 	echo "All patches refreshed in $(PATCHES)/ -- review and commit."
 
+pkg-prepare:
+	@test -f $(SRC)/package-lock.json || { echo "No $(SRC)/ -- run 'make prepare' first"; exit 1; }
+	bash support/pkg-work.sh prepare $(SRC) $(PKGWORK) '$(PKG)'
+
+pkg-update:
+	@test -d $(PKGWORK)/node_modules || { echo "No $(PKGWORK)/ -- run 'make pkg-prepare' first"; exit 1; }
+	bash support/pkg-work.sh update $(PKGWORK) '$(PKG)' '$(APPEND)'
+
+# Build context is the prepared $(SRC)/ (it must contain the staged pkg-patches/).
+test-image:
+	@test -d $(SRC)/pkg-patches || { echo "No staged $(SRC)/pkg-patches -- run 'make prepare' first"; exit 1; }
+	docker build -f support/Dockerfile.test -t '$(TEST_IMAGE)' $(SRC)
+
+# Copy TREE's sources over /app in the test image (node_modules and built dist/
+# from the image are kept), then run CMD from /app.
+test:
+	@docker image inspect '$(TEST_IMAGE)' >/dev/null 2>&1 || { echo "No $(TEST_IMAGE) -- run 'make test-image' first"; exit 1; }
+	docker run --rm -v "$(abspath $(TREE)):/src:ro" '$(TEST_IMAGE)' sh -euc \
+		'tar -C /src --exclude=./node_modules --exclude="*/node_modules" --exclude=./.pc -cf - . | tar -C /app -xf -; cd /app; $(CMD)'
+
 clean:
-	rm -rf $(SRC)
+	rm -rf $(SRC) $(PKGWORK)
 
 clean-image:
 	-docker image rm '$(IMAGE)'
+	-docker image rm '$(TEST_IMAGE)'

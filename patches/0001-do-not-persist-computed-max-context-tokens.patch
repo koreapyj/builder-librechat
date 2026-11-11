@@ -1,0 +1,52 @@
+Do not persist the computed maxContextTokens on the conversation
+
+getSaveOptions() saved the context budget computed by initializeAgent into
+conversations.maxContextTokens. The next turn read it back as a user-specified
+value and subtracted the output reserve again, shrinking the budget every turn.
+Only the user/spec value (carried by runOptions) is persisted now.
+
+--- a/api/server/controllers/agents/client.js
++++ b/api/server/controllers/agents/client.js
+@@ -1961,7 +1961,6 @@ class AgentClient extends BaseClient {
+           modelLabel: this.options.modelLabel,
+           resendFiles: this.options.resendFiles,
+           imageDetail: this.options.imageDetail,
+-          maxContextTokens: this.maxContextTokens,
+           codeApprovalMode,
+           ...persistedCodeEnvironmentDecision,
+         },
+--- a/api/server/controllers/agents/client.test.js
++++ b/api/server/controllers/agents/client.test.js
+@@ -126,6 +126,32 @@ describe('AgentClient code approval pers
+     expect(saveOptions).not.toHaveProperty('codeWorkspaces');
+   });
+ 
++  it('does not persist the computed maxContextTokens but keeps a user-provided one', () => {
++    const base = {
++      endpoint: EModelEndpoint.agents,
++      agent: { id: 'attached-agent' },
++      req: { body: {}, config: { endpoints: { [EModelEndpoint.agents]: {} } } },
++    };
++    const computed = Object.create(AgentClient.prototype);
++    computed.agentConfigs = new Map();
++    computed.maxContextTokens = 750000;
++    computed.options = { ...base };
++    expect(computed.getSaveOptions()).not.toHaveProperty('maxContextTokens');
++
++    const user = Object.create(AgentClient.prototype);
++    user.agentConfigs = new Map();
++    user.maxContextTokens = 750000;
++    user.options = {
++      ...base,
++      endpoint: 'custom',
++      req: {
++        ...base.req,
++        body: { endpointOption: { model_parameters: { maxContextTokens: 500000 } } },
++      },
++    };
++    expect(user.getSaveOptions().maxContextTokens).toBe(500000);
++  });
++
+   it('records only the mode a legacy conversation inferred', () => {
+     const client = Object.create(AgentClient.prototype);
+     client.agentConfigs = new Map();

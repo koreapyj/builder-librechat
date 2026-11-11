@@ -1,0 +1,81 @@
+Pass provider 'anthropic' to the history formatter for Anthropic runs
+
+formatAgentMessages only takes its Anthropic-specific paths (server tool
+result pairing, duplicate tool_call de-dupe, inline tool_use) when it is given
+options.provider, which LibreChat never passed. Pass it when any reachable agent
+is Anthropic (including custom endpoints with provider: anthropic). The
+memory-agent formatting call stays provider-less. Non-Anthropic agents in the
+same run get the shared history projected back to their own shape by
+@librechat/agents (pkg-patches 006).
+
+--- a/api/server/controllers/agents/client.js
++++ b/api/server/controllers/agents/client.js
+@@ -4658,8 +4658,11 @@ class AgentClient extends BaseClient {
+       }
+       const hasMessageFormatOptions =
+         needsReasoningContentFormat || freshSkillPrimeNames.size > 0 || useLegacyContent;
++      // builder-librechat: pass-anthropic-provider-to-history-formatter
++      const hasAnthropicAgent = reachableAgents.some((agent) => agent.provider === Providers.ANTHROPIC);
+       const formatOptions = {
+         ...messageFormatOptions,
++        ...(hasAnthropicAgent ? { provider: Providers.ANTHROPIC } : {}),
+         compactionSemanticIndex: {
+           ...(this.eventActorContinuation === 'warm' && this.compactionSemanticIndexSnapshot != null
+             ? { baseSnapshot: this.compactionSemanticIndexSnapshot }
+--- a/api/server/controllers/agents/client.test.js
++++ b/api/server/controllers/agents/client.test.js
+@@ -2724,6 +2724,54 @@ describe('AgentClient - startup telemetr
+     expect(processStream).toHaveBeenCalledTimes(1);
+   });
+ 
++  it.each([
++    ['anthropic', EModelEndpoint.anthropic, 'anthropic'],
++    ['openAI', EModelEndpoint.openAI, undefined],
++  ])('passes provider to the history formatter only for anthropic agents (%s)', async (_n, provider, expected) => {
++    jest.clearAllMocks();
++    mockIsHITLEnabled.mockReturnValue(false);
++    const processStream = jest.fn().mockResolvedValue();
++    mockCreateRun.mockResolvedValueOnce({
++      Graph: null,
++      processStream,
++      getCalibrationRatio: jest.fn(() => 0),
++      getInterrupt: jest.fn(() => undefined),
++    });
++    const client = new AgentClient({
++      req: {
++        user: { id: 'user-123' },
++        body: {},
++        config: { endpoints: { [EModelEndpoint.agents]: {} } },
++        _resumableStreamId: 'provider-format-conversation',
++      },
++      res: {},
++      agent: {
++        id: 'agent-primary',
++        endpoint: provider,
++        provider,
++        model_parameters: { model: 'm' },
++        hide_sequential_outputs: false,
++      },
++      endpointTokenConfig: {},
++      eventHandlers: {},
++      contentParts: [],
++      collectedUsage: [],
++      artifactPromises: [],
++    });
++    client.conversationId = 'provider-format-conversation';
++    client.responseMessageId = 'provider-format-response';
++    client.parentMessageId = 'provider-format-parent';
++    client.recordCollectedUsage = jest.fn().mockResolvedValue();
++
++    await client.chatCompletion({ payload: [] });
++
++    const formatOptions = mockFormatAgentMessages.mock.calls[0][4];
++    expect(formatOptions.provider).toBe(expected);
++    if (expected == null) {
++      expect(formatOptions).not.toHaveProperty('provider');
++    }
++  });
++
+   it('preserves provider messages while deriving the full semantic index', () => {
+     const { formatAgentMessages } = jest.requireActual('@librechat/agents');
+     const { stripActivityLabelParts } = jest.requireActual('@librechat/api');

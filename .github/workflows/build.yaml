@@ -78,7 +78,7 @@ jobs:
           # Patch revision: content hash of everything that changes what gets built
           # on top of upstream. README edits etc. do not trigger a rebuild.
           rev="$( { cat patches/series; \
-                    find patches -name '*.patch' -type f | LC_ALL=C sort | xargs -r cat; \
+                    find patches pkg-patches -name '*.patch' -type f | LC_ALL=C sort | xargs -r cat; \
                     cat support/apply-patches.sh; } | sha256sum | cut -c1-12 )"
 
           publish=false

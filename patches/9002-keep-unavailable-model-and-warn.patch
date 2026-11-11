@@ -1,0 +1,173 @@
+Do not silently replace an unavailable model with the endpoint's first model
+
+When a model spec, preset or conversation names a model missing from the
+endpoint's model list, buildDefaultConvo dropped it and parseConvo picked the
+first listed model, so requests went to a different model without notice. Keep
+the requested model (the server's validateAgentModel rejects it visibly) and
+show a warning toast. A stale lastSelectedModel still falls back as before.
+
+--- a/client/src/utils/buildDefaultConvo.ts
++++ b/client/src/utils/buildDefaultConvo.ts
+@@ -15,12 +15,15 @@ const buildDefaultConvo = ({
+   endpoint = null,
+   lastConversationSetup,
+   defaultParamsEndpoint,
++  onModelUnavailable,
+ }: {
+   models: string[];
+   conversation: TConversation;
+   endpoint?: EModelEndpoint | null;
+   lastConversationSetup: TConversation | null;
+   defaultParamsEndpoint?: string | null;
++  /** Called when the requested conversation/preset/spec model is not in the endpoint's model list */
++  onModelUnavailable?: (model: string, endpoint: string) => void;
+ }): TConversation => {
+   const { lastSelectedModel, lastSelectedTools } = getLocalStorageItems();
+   const endpointType = lastConversationSetup?.endpointType ?? conversation.endpointType;
+@@ -38,8 +41,17 @@ const buildDefaultConvo = ({
+ 
+   let possibleModels: string[];
+ 
++  const requestedModel = lastConversationSetup?.model;
+   if (availableModels.includes(model)) {
+     possibleModels = [model, ...availableModels];
++  } else if (
++    typeof requestedModel === 'string' &&
++    requestedModel !== '' &&
++    availableModels.length > 0
++  ) {
++    // Keep the requested model instead of silently substituting the first available one
++    possibleModels = [requestedModel, ...availableModels];
++    onModelUnavailable?.(requestedModel, endpoint);
+   } else {
+     possibleModels = [...availableModels];
+   }
+--- a/client/src/hooks/useNewConvo.ts
++++ b/client/src/hooks/useNewConvo.ts
+@@ -23,7 +23,9 @@ import type {
+   TConversation,
+   TEndpointsConfig,
+ } from 'librechat-data-provider';
++import { useToastContext } from '@librechat/client';
+ import type { AssistantListItem } from '~/common';
++import { NotificationSeverity } from '~/common';
+ import {
+   updateLastSelectedModel,
+   getLocalStorageItems,
+@@ -55,7 +57,7 @@ import { useResetChatBadges } from './us
+ import { useApplyModelSpecEffects } from './Agents';
+ import { useAgentsMapContext } from '~/Providers';
+ import { usePauseGlobalAudio } from './Audio';
+-import { useHasAccess } from '~/hooks';
++import { useHasAccess, useLocalize } from '~/hooks';
+ import store from '~/store';
+ 
+ export function clearInheritedAgentWorkspace(
+@@ -74,6 +76,8 @@ export function clearInheritedAgentWorks
+ 
+ const useNewConvo = (index = 0) => {
+   const navigate = useNavigate();
++  const localize = useLocalize();
++  const { showToast } = useToastContext();
+   const [searchParams] = useSearchParams();
+   const { data: startupConfig } = useGetStartupConfig();
+   const getConversation = useGetConversation(index);
+@@ -235,6 +239,12 @@ const useNewConvo = (index = 0) => {
+             endpoint: defaultEndpoint,
+             models,
+             defaultParamsEndpoint,
++            onModelUnavailable: (unavailableModel) =>
++              showToast({
++                message: localize('com_ui_model_unavailable', { 0: unavailableModel }),
++                severity: NotificationSeverity.WARNING,
++                showIcon: true,
++              }),
+           });
+ 
+           if (hasExplicitChatProjectId) {
+--- a/client/src/locales/en/translation.json
++++ b/client/src/locales/en/translation.json
+@@ -1886,6 +1886,7 @@
+   "com_ui_model_parameters_reset": "Model Parameters have been reset.",
+   "com_ui_model_selected": "{{0}} selected",
+   "com_ui_model_spec": "Model Spec",
++  "com_ui_model_unavailable": "The model \"{{0}}\" is not available for this endpoint.",
+   "com_ui_more_count": "{{0}} more",
+   "com_ui_more_info": "More info",
+   "com_ui_more_options": "More options",
+--- a/client/src/hooks/__tests__/useNewConvo.spec.ts
++++ b/client/src/hooks/__tests__/useNewConvo.spec.ts
+@@ -101,7 +101,9 @@ jest.mock('../useChatBadges', () => ({ u
+ jest.mock('../Agents', () => ({ useApplyModelSpecEffects: () => jest.fn() }));
+ jest.mock('../Audio', () => ({ usePauseGlobalAudio: () => ({ pauseGlobalAudio: jest.fn() }) }));
+ jest.mock('~/Providers', () => ({ useAgentsMapContext: () => ({}) }));
+-jest.mock('~/hooks', () => ({ useHasAccess: () => true }));
++jest.mock('~/hooks', () => ({ useHasAccess: () => true, useLocalize: () => (key: string) => key }));
++jest.mock('@librechat/client', () => ({ useToastContext: () => ({ showToast: jest.fn() }) }));
++jest.mock('~/common', () => ({ NotificationSeverity: { WARNING: 'warning' } }));
+ jest.mock('~/store', () => ({
+   __esModule: true,
+   default: {
+--- a/client/src/utils/__tests__/buildDefaultConvo.test.ts
++++ b/client/src/utils/__tests__/buildDefaultConvo.test.ts
+@@ -1,6 +1,7 @@
+ import { EModelEndpoint } from 'librechat-data-provider';
+ import type { TConversation } from 'librechat-data-provider';
+ import buildDefaultConvo from '../buildDefaultConvo';
++import { getLocalStorageItems } from '../localStorage';
+ 
+ jest.mock('../localStorage', () => ({
+   getLocalStorageItems: jest.fn(() => ({
+@@ -200,3 +201,52 @@ describe('buildDefaultConvo - defaultPar
+     });
+   });
+ });
++
++describe('buildDefaultConvo - unavailable model', () => {
++  const models = ['gpt-4o', 'gpt-4o-mini'];
++  const endpoint = EModelEndpoint.openAI;
++  const build = (
++    lastConversationSetup: TConversation | null,
++    onModelUnavailable?: (model: string, endpoint: string) => void,
++    modelList = models,
++  ) =>
++    buildDefaultConvo({
++      models: modelList,
++      conversation: baseConversation,
++      endpoint,
++      lastConversationSetup,
++      onModelUnavailable,
++    });
++
++  it('keeps a model missing from the list and calls onModelUnavailable', () => {
++    const cb = jest.fn();
++    const result = build({ ...baseConversation, endpoint, model: 'gpt-missing' }, cb);
++    expect(result.model).toBe('gpt-missing');
++    expect(cb).toHaveBeenCalledWith('gpt-missing', endpoint);
++  });
++
++  it('does not change an available model nor call the callback', () => {
++    const cb = jest.fn();
++    const result = build({ ...baseConversation, endpoint, model: 'gpt-4o-mini' }, cb);
++    expect(result.model).toBe('gpt-4o-mini');
++    expect(cb).not.toHaveBeenCalled();
++  });
++
++  it('falls back to the list for a stale lastSelectedModel without calling the callback', () => {
++    (getLocalStorageItems as jest.Mock).mockReturnValueOnce({
++      lastSelectedModel: { [endpoint]: 'gpt-stale' },
++      lastSelectedTools: [],
++      lastConversationSetup: {},
++    });
++    const cb = jest.fn();
++    const result = build({ ...baseConversation, endpoint }, cb);
++    expect(result.model).toBe('gpt-4o');
++    expect(cb).not.toHaveBeenCalled();
++  });
++
++  it('keeps previous behavior for an empty models list', () => {
++    const cb = jest.fn();
++    build({ ...baseConversation, endpoint, model: 'gpt-missing' }, cb, []);
++    expect(cb).not.toHaveBeenCalled();
++  });
++});

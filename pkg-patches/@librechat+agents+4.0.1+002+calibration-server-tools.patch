@@ -1,0 +1,48 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs b/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs
+index c8f97fe..7629095
+--- a/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs
+@@ -1275,10 +1275,19 @@ function createPruneMessages(factoryParams) {
+ 			}
+ 			const providerMessageTokens = Math.max(0, providerInputTokens - instructionOverhead);
+ 			const minimumComparableInputTokens = instructionOverhead + rawSentThisTurn * CALIBRATION_RATIO_MIN;
++			// builder-librechat: server-tool turns report cumulative input over internal iterations; skip calibration.
++			let hasServerToolUsage = false;
++			for (let i = lastTurnStartIndex; i < params.messages.length && !hasServerToolUsage; i++) {
++				const turnMessage = params.messages[i];
++				if (turnMessage.getType() !== "ai") continue;
++				if (turnMessage.tool_calls?.some((toolCall) => typeof toolCall.id === "string" && toolCall.id.startsWith("srvtoolu_"))) hasServerToolUsage = true;
++				else if (Array.isArray(turnMessage.content)) hasServerToolUsage = turnMessage.content.some((block) => typeof block?.type === "string" && (block.type === "server_tool_use" || block.type.endsWith("_tool_result")));
++			}
+ 			let calibrationSkipReason;
+ 			if (rawSentThisTurn <= 0) calibrationSkipReason = "no_sent_messages";
+ 			else if (providerMessageTokens <= 0) calibrationSkipReason = "input_below_instruction_overhead";
+ 			else if (providerInputTokens < minimumComparableInputTokens) calibrationSkipReason = "input_below_calibration_floor";
++			else if (hasServerToolUsage) calibrationSkipReason = "server_tool_usage";
+ 			if (calibrationSkipReason == null) {
+ 				cumulativeRawSent += rawSentThisTurn;
+ 				cumulativeProviderReported += providerMessageTokens;
+diff --git a/node_modules/@librechat/agents/dist/esm/messages/prune.mjs b/node_modules/@librechat/agents/dist/esm/messages/prune.mjs
+index c3771eb..2d8c743
+--- a/node_modules/@librechat/agents/dist/esm/messages/prune.mjs
++++ b/node_modules/@librechat/agents/dist/esm/messages/prune.mjs
+@@ -1275,10 +1275,19 @@ function createPruneMessages(factoryParams) {
+ 			}
+ 			const providerMessageTokens = Math.max(0, providerInputTokens - instructionOverhead);
+ 			const minimumComparableInputTokens = instructionOverhead + rawSentThisTurn * CALIBRATION_RATIO_MIN;
++			// builder-librechat: server-tool turns report cumulative input over internal iterations; skip calibration.
++			let hasServerToolUsage = false;
++			for (let i = lastTurnStartIndex; i < params.messages.length && !hasServerToolUsage; i++) {
++				const turnMessage = params.messages[i];
++				if (turnMessage.getType() !== "ai") continue;
++				if (turnMessage.tool_calls?.some((toolCall) => typeof toolCall.id === "string" && toolCall.id.startsWith("srvtoolu_"))) hasServerToolUsage = true;
++				else if (Array.isArray(turnMessage.content)) hasServerToolUsage = turnMessage.content.some((block) => typeof block?.type === "string" && (block.type === "server_tool_use" || block.type.endsWith("_tool_result")));
++			}
+ 			let calibrationSkipReason;
+ 			if (rawSentThisTurn <= 0) calibrationSkipReason = "no_sent_messages";
+ 			else if (providerMessageTokens <= 0) calibrationSkipReason = "input_below_instruction_overhead";
+ 			else if (providerInputTokens < minimumComparableInputTokens) calibrationSkipReason = "input_below_calibration_floor";
++			else if (hasServerToolUsage) calibrationSkipReason = "server_tool_usage";
+ 			if (calibrationSkipReason == null) {
+ 				cumulativeRawSent += rawSentThisTurn;
+ 				cumulativeProviderReported += providerMessageTokens;

@@ -1,0 +1,26 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+index 0cbb176..9fc0aac
+--- a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+@@ -858,7 +858,7 @@ function formatAssistantMessage(message, options) {
+ 					lastAIMessage.tool_calls.push(tool_call);
+ 				}
+ 				appendFormattedMessage(withMessageRole(new _langchain_core_messages.ToolMessage({
+-					tool_call_id: tool_call.id ?? "",
++					tool_call_id: options?.provider === "anthropic" && Array.isArray(lastAIMessage.content) ? require_message_inputs.normalizeAnthropicToolCallId(tool_call.id ?? "") : tool_call.id ?? "", // builder-librechat: normalize-inline-tool-result-ids
+ 					name: tool_call.name,
+ 					content: formatToolCallOutput(output)
+ 				}), "tool"), "tool", sourcePartIndices);
+diff --git a/node_modules/@librechat/agents/dist/esm/messages/format.mjs b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+index dbcfd7f..5c0e532
+--- a/node_modules/@librechat/agents/dist/esm/messages/format.mjs
++++ b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+@@ -858,7 +858,7 @@ function formatAssistantMessage(message, options) {
+ 					lastAIMessage.tool_calls.push(tool_call);
+ 				}
+ 				appendFormattedMessage(withMessageRole(new ToolMessage({
+-					tool_call_id: tool_call.id ?? "",
++					tool_call_id: options?.provider === "anthropic" && Array.isArray(lastAIMessage.content) ? normalizeAnthropicToolCallId(tool_call.id ?? "") : tool_call.id ?? "", // builder-librechat: normalize-inline-tool-result-ids
+ 					name: tool_call.name,
+ 					content: formatToolCallOutput(output)
+ 				}), "tool"), "tool", sourcePartIndices);

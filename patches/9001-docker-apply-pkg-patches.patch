@@ -1,0 +1,21 @@
+Apply patch-package patches to npm dependencies during the image build
+
+builder-librechat stages its pkg-patches/ into the checkout; run patch-package
+right after `npm ci` (in its own layer, so the install cache survives patch
+edits) and fail the build if a patch does not apply.
+
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -54,6 +54,12 @@ RUN \
+         sleep 10 ; \
+     done
+ 
++# builder-librechat: apply patch-package patches to npm dependencies. The patch
++# files are staged into pkg-patches/ by support/apply-patches.sh. Kept separate
++# from the npm ci layer so editing a patch does not invalidate the install cache.
++COPY --chown=node:node pkg-patches ./pkg-patches
++RUN npx --yes patch-package@8.0.1 --error-on-fail --patch-dir pkg-patches
++
+ COPY --chown=node:node . .
+ 
+ RUN \

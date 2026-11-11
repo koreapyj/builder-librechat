@@ -1,0 +1,206 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs b/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs
+index edab2f4..5a77930
+--- a/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/llm/prepareProviderRequest.cjs
+@@ -147,10 +147,97 @@ function projectAttachmentsForProvider(messages, provider) {
+ 	}
+ 	return projected ?? messages;
+ }
++// builder-librechat: project Anthropic-only content shapes (shared history) for non-Anthropic providers.
++const BUILDER_ANTHROPIC_ONLY_BLOCKS = new Set([
++	"server_tool_use",
++	"web_search_tool_result",
++	"web_fetch_tool_result",
++	"code_execution_tool_result",
++	"mcp_tool_use",
++	"mcp_tool_result"
++]);
++function builderProjectAnthropicShapes(messages) {
++	let projected;
++	for (let i = 0; i < messages.length; i++) {
++		const message = messages[i];
++		if (message.getType() !== "ai" || !Array.isArray(message.content)) continue;
++		let changed = false;
++		const content = [];
++		const lifted = [];
++		for (const block of message.content) {
++			if (block == null || typeof block !== "object") {
++				content.push(block);
++				continue;
++			}
++			if (BUILDER_ANTHROPIC_ONLY_BLOCKS.has(block.type)) {
++				changed = true;
++				continue;
++			}
++			if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
++				changed = true;
++				let args = block.input;
++				if (typeof args === "string") try {
++					args = JSON.parse(args);
++				} catch {
++					args = {};
++				}
++				if (args == null || typeof args !== "object" || Array.isArray(args)) args = {};
++				lifted.push({
++					id: block.id,
++					name: block.name,
++					args,
++					type: "tool_call"
++				});
++				continue;
++			}
++			if (block.type === "text" && ("citations" in block || "tool_call_ids" in block)) {
++				changed = true;
++				const { citations: _citations, tool_call_ids: _toolCallIds, ...rest } = block;
++				content.push(rest);
++				continue;
++			}
++			content.push(block);
++		}
++		if (!changed) continue;
++		const existing = message.tool_calls ?? [];
++		const seen = new Set(existing.map((toolCall) => toolCall.id));
++		const toolCalls = existing.concat(lifted.filter((toolCall) => !seen.has(toolCall.id) && seen.add(toolCall.id)));
++		projected ??= [...messages];
++		if (content.length === 0 && toolCalls.length === 0) {
++			projected[i] = void 0;
++			continue;
++		}
++		const descriptors = Object.getOwnPropertyDescriptors(message);
++		const replace = (key, value) => {
++			const descriptor = descriptors[key];
++			descriptors[key] = {
++				configurable: descriptor?.configurable ?? true,
++				enumerable: descriptor?.enumerable ?? true,
++				value,
++				writable: descriptor?.writable ?? true
++			};
++		};
++		replace("content", content);
++		replace("tool_calls", toolCalls);
++		const lcKwargs = descriptors.lc_kwargs;
++		if (lcKwargs != null && "value" in lcKwargs && typeof lcKwargs.value === "object" && lcKwargs.value != null) descriptors.lc_kwargs = {
++			...lcKwargs,
++			value: {
++				...lcKwargs.value,
++				content,
++				tool_calls: toolCalls
++			}
++		};
++		projected[i] = Object.create(Object.getPrototypeOf(message), descriptors);
++	}
++	return projected == null ? messages : projected.filter((message) => message !== void 0);
++}
+ function projectMessagesForProviderMode({ messages, provider, maxToolResultChars, toolHistory }, projectionMode) {
+ 	const providerFamily = require_providerRegistry.getProviderFamily(provider);
+ 	const nativeOpenAIResponses = projectionMode === "openai-responses";
+-	const providerInputMessages = projectAttachmentsForProvider(require_core.projectToolStreamContentForProvider(messages, nativeOpenAIResponses ? "native" : "fallback", maxToolResultChars, toolHistory), provider);
++	// builder-librechat: shared Anthropic-formatted history must not leak Anthropic-only shapes to other providers.
++	const sharedMessages = provider === "anthropic" || providerFamily === "anthropic" ? messages : builderProjectAnthropicShapes(messages);
++	const providerInputMessages = projectAttachmentsForProvider(require_core.projectToolStreamContentForProvider(sharedMessages, nativeOpenAIResponses ? "native" : "fallback", maxToolResultChars, toolHistory), provider);
+ 	if (nativeOpenAIResponses) return require_core.projectOpenAIResponsesToolMessageContent(require_cache.stripAnthropicCacheControl(require_cache.stripBedrockCacheControl(providerInputMessages)), maxToolResultChars);
+ 	if (provider === "openrouter") return require_core.projectComputerCallOutputsToText(require_core.projectOpenRouterToolMessageContent(require_cache.stripBedrockCacheControl(providerInputMessages), maxToolResultChars));
+ 	if (require_llm.isOpenAILike(provider)) return require_core.projectComputerCallOutputsToText(require_core.projectOpenAIChatToolMessageContent(require_cache.stripAnthropicCacheControl(require_cache.stripBedrockCacheControl(providerInputMessages)), maxToolResultChars));
+diff --git a/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs b/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs
+index a166dcb..5032ada
+--- a/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs
++++ b/node_modules/@librechat/agents/dist/esm/llm/prepareProviderRequest.mjs
+@@ -147,10 +147,97 @@ function projectAttachmentsForProvider(messages, provider) {
+ 	}
+ 	return projected ?? messages;
+ }
++// builder-librechat: project Anthropic-only content shapes (shared history) for non-Anthropic providers.
++const BUILDER_ANTHROPIC_ONLY_BLOCKS = new Set([
++	"server_tool_use",
++	"web_search_tool_result",
++	"web_fetch_tool_result",
++	"code_execution_tool_result",
++	"mcp_tool_use",
++	"mcp_tool_result"
++]);
++function builderProjectAnthropicShapes(messages) {
++	let projected;
++	for (let i = 0; i < messages.length; i++) {
++		const message = messages[i];
++		if (message.getType() !== "ai" || !Array.isArray(message.content)) continue;
++		let changed = false;
++		const content = [];
++		const lifted = [];
++		for (const block of message.content) {
++			if (block == null || typeof block !== "object") {
++				content.push(block);
++				continue;
++			}
++			if (BUILDER_ANTHROPIC_ONLY_BLOCKS.has(block.type)) {
++				changed = true;
++				continue;
++			}
++			if (block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string") {
++				changed = true;
++				let args = block.input;
++				if (typeof args === "string") try {
++					args = JSON.parse(args);
++				} catch {
++					args = {};
++				}
++				if (args == null || typeof args !== "object" || Array.isArray(args)) args = {};
++				lifted.push({
++					id: block.id,
++					name: block.name,
++					args,
++					type: "tool_call"
++				});
++				continue;
++			}
++			if (block.type === "text" && ("citations" in block || "tool_call_ids" in block)) {
++				changed = true;
++				const { citations: _citations, tool_call_ids: _toolCallIds, ...rest } = block;
++				content.push(rest);
++				continue;
++			}
++			content.push(block);
++		}
++		if (!changed) continue;
++		const existing = message.tool_calls ?? [];
++		const seen = new Set(existing.map((toolCall) => toolCall.id));
++		const toolCalls = existing.concat(lifted.filter((toolCall) => !seen.has(toolCall.id) && seen.add(toolCall.id)));
++		projected ??= [...messages];
++		if (content.length === 0 && toolCalls.length === 0) {
++			projected[i] = void 0;
++			continue;
++		}
++		const descriptors = Object.getOwnPropertyDescriptors(message);
++		const replace = (key, value) => {
++			const descriptor = descriptors[key];
++			descriptors[key] = {
++				configurable: descriptor?.configurable ?? true,
++				enumerable: descriptor?.enumerable ?? true,
++				value,
++				writable: descriptor?.writable ?? true
++			};
++		};
++		replace("content", content);
++		replace("tool_calls", toolCalls);
++		const lcKwargs = descriptors.lc_kwargs;
++		if (lcKwargs != null && "value" in lcKwargs && typeof lcKwargs.value === "object" && lcKwargs.value != null) descriptors.lc_kwargs = {
++			...lcKwargs,
++			value: {
++				...lcKwargs.value,
++				content,
++				tool_calls: toolCalls
++			}
++		};
++		projected[i] = Object.create(Object.getPrototypeOf(message), descriptors);
++	}
++	return projected == null ? messages : projected.filter((message) => message !== void 0);
++}
+ function projectMessagesForProviderMode({ messages, provider, maxToolResultChars, toolHistory }, projectionMode) {
+ 	const providerFamily = getProviderFamily(provider);
+ 	const nativeOpenAIResponses = projectionMode === "openai-responses";
+-	const providerInputMessages = projectAttachmentsForProvider(projectToolStreamContentForProvider(messages, nativeOpenAIResponses ? "native" : "fallback", maxToolResultChars, toolHistory), provider);
++	// builder-librechat: shared Anthropic-formatted history must not leak Anthropic-only shapes to other providers.
++	const sharedMessages = provider === "anthropic" || providerFamily === "anthropic" ? messages : builderProjectAnthropicShapes(messages);
++	const providerInputMessages = projectAttachmentsForProvider(projectToolStreamContentForProvider(sharedMessages, nativeOpenAIResponses ? "native" : "fallback", maxToolResultChars, toolHistory), provider);
+ 	if (nativeOpenAIResponses) return projectOpenAIResponsesToolMessageContent(stripAnthropicCacheControl(stripBedrockCacheControl(providerInputMessages)), maxToolResultChars);
+ 	if (provider === "openrouter") return projectComputerCallOutputsToText(projectOpenRouterToolMessageContent(stripBedrockCacheControl(providerInputMessages), maxToolResultChars));
+ 	if (isOpenAILike(provider)) return projectComputerCallOutputsToText(projectOpenAIChatToolMessageContent(stripAnthropicCacheControl(stripBedrockCacheControl(providerInputMessages)), maxToolResultChars));

@@ -1,0 +1,32 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+index c695990..0cbb176
+--- a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+@@ -904,8 +904,10 @@ function formatAssistantMessage(message, options) {
+ 	}
+ 	if (hasReasoning && currentContent.length > 0) {
+ 		let content = "";
++		// builder-librechat: keep text parts as blocks when any carries citations (a plain string would drop them)
++		const hasCitations = currentContent.some((part) => part.type === "text" && Array.isArray(part.citations) && part.citations.length > 0);
+ 		for (const part of currentContent) {
+-			if (part.type !== "text") {
++			if (part.type !== "text" || hasCitations) {
+ 				appendAIMessage(require_langchain.toLangChainContent(currentContent), currentContentProvenance);
+ 				return finalizeFormattedMessages();
+ 			}
+diff --git a/node_modules/@librechat/agents/dist/esm/messages/format.mjs b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+index 23e89cf..dbcfd7f
+--- a/node_modules/@librechat/agents/dist/esm/messages/format.mjs
++++ b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+@@ -904,8 +904,10 @@ function formatAssistantMessage(message, options) {
+ 	}
+ 	if (hasReasoning && currentContent.length > 0) {
+ 		let content = "";
++		// builder-librechat: keep text parts as blocks when any carries citations (a plain string would drop them)
++		const hasCitations = currentContent.some((part) => part.type === "text" && Array.isArray(part.citations) && part.citations.length > 0);
+ 		for (const part of currentContent) {
+-			if (part.type !== "text") {
++			if (part.type !== "text" || hasCitations) {
+ 				appendAIMessage(toLangChainContent(currentContent), currentContentProvenance);
+ 				return finalizeFormattedMessages();
+ 			}
