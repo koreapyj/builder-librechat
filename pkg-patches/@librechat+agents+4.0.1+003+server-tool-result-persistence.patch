@@ -1,5 +1,5 @@
 diff --git a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
-index 9745dbd..c695990
+index 9745dbd..8d85651
 --- a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
 +++ b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
 @@ -787,6 +787,34 @@ function formatAssistantMessage(message, options) {
@@ -37,6 +37,16 @@ index 9745dbd..c695990
  					if (!serverToolResultIds.has(_tool_call.id) && options.preserveUnpairedServerToolUses !== true) continue;
  					if (emittedServerToolUseIds.has(_tool_call.id) || pendingServerToolUses.has(_tool_call.id)) continue;
  					const serverToolInput = parseServerToolInput(_args);
+@@ -1229,7 +1257,8 @@ const formatAgentMessages = (payload, indexTokenCountMap, tools, skills, options
+ 						const extracted = extractToolNamesFromSearchOutput(part.tool_call.output);
+ 						for (const name of extracted) discoveredTools.add(name);
+ 					}
+-					if (discoveredTools.has(toolName) || isSdkManagedToolName(toolName)) {
++					const isProviderServerToolCall = options?.provider === "anthropic" && typeof part.tool_call.id === "string" && part.tool_call.id.startsWith("srvtoolu_");
++					if (discoveredTools.has(toolName) || isSdkManagedToolName(toolName) || isProviderServerToolCall) {
+ 						filteredContent.push(part);
+ 						filteredSourceContentPartIndices.push(partSourceContentIndices);
+ 						if (toolName === "skill" && skills?.size != null && skills.size > 0) {
 diff --git a/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs b/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs
 index 2f30cfa..74b4d37
 --- a/node_modules/@librechat/agents/dist/cjs/tools/handlers.cjs
@@ -103,7 +113,7 @@ index 2f30cfa..74b4d37
  //#endregion
  exports.handleServerToolResult = handleServerToolResult;
 diff --git a/node_modules/@librechat/agents/dist/esm/messages/format.mjs b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
-index 86e8d40..23e89cf
+index 86e8d40..0b4cff5
 --- a/node_modules/@librechat/agents/dist/esm/messages/format.mjs
 +++ b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
 @@ -787,6 +787,34 @@ function formatAssistantMessage(message, options) {
@@ -141,6 +151,16 @@ index 86e8d40..23e89cf
  					if (!serverToolResultIds.has(_tool_call.id) && options.preserveUnpairedServerToolUses !== true) continue;
  					if (emittedServerToolUseIds.has(_tool_call.id) || pendingServerToolUses.has(_tool_call.id)) continue;
  					const serverToolInput = parseServerToolInput(_args);
+@@ -1229,7 +1257,8 @@ const formatAgentMessages = (payload, indexTokenCountMap, tools, skills, options
+ 						const extracted = extractToolNamesFromSearchOutput(part.tool_call.output);
+ 						for (const name of extracted) discoveredTools.add(name);
+ 					}
+-					if (discoveredTools.has(toolName) || isSdkManagedToolName(toolName)) {
++					const isProviderServerToolCall = options?.provider === "anthropic" && typeof part.tool_call.id === "string" && part.tool_call.id.startsWith("srvtoolu_");
++					if (discoveredTools.has(toolName) || isSdkManagedToolName(toolName) || isProviderServerToolCall) {
+ 						filteredContent.push(part);
+ 						filteredSourceContentPartIndices.push(partSourceContentIndices);
+ 						if (toolName === "skill" && skills?.size != null && skills.size > 0) {
 diff --git a/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs b/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs
 index a2c0aac..1cbaa87
 --- a/node_modules/@librechat/agents/dist/esm/tools/handlers.mjs

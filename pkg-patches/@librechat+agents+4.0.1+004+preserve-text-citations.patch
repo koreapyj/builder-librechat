@@ -1,5 +1,5 @@
 diff --git a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
-index c695990..0cbb176
+index 8d85651..17d6885
 --- a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
 +++ b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
 @@ -904,8 +904,10 @@ function formatAssistantMessage(message, options) {
@@ -15,7 +15,7 @@ index c695990..0cbb176
  				return finalizeFormattedMessages();
  			}
 diff --git a/node_modules/@librechat/agents/dist/esm/messages/format.mjs b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
-index 23e89cf..dbcfd7f
+index 0b4cff5..145bdde
 --- a/node_modules/@librechat/agents/dist/esm/messages/format.mjs
 +++ b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
 @@ -904,8 +904,10 @@ function formatAssistantMessage(message, options) {
