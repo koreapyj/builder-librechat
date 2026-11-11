@@ -1,0 +1,7 @@
+.ref
+.tmp
+.claude
+
+# Local patch-authoring workspace (not committed; see Makefile).
+/src/
+/.pc/

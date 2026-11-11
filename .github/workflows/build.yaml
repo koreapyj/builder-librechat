@@ -1,0 +1,218 @@
+name: Build patched LibreChat image
+
+# Tracks the newest stable LibreChat tag daily. A build runs only when the
+# (upstream tag, patch set) pair has no published image yet, so most scheduled
+# runs are no-ops. Any failure -- a patch that no longer applies with fuzz=0, a
+# build error or a failed smoke test -- fails the run: that is the signal that
+# the patch series needs work (see patches/README.md).
+
+on:
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+  pull_request:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      lc_ref:
+        description: 'LibreChat ref to build (default: newest stable vX.Y.Z tag). Not tagged latest.'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuild and re-push even if the image already exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)) }}
+
+env:
+  LC_GH_REPO: LibreChat-AI/LibreChat
+  IMAGE: ghcr.io/koreapyj/librechat
+
+jobs:
+  resolve:
+    name: Resolve upstream tag and patch revision
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      lc_ref: ${{ steps.resolve.outputs.lc_ref }}
+      rev: ${{ steps.resolve.outputs.rev }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      latest: ${{ steps.resolve.outputs.latest }}
+      has_work: ${{ steps.resolve.outputs.has_work }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_LC_REF: ${{ inputs.lc_ref }}
+          INPUT_FORCE: ${{ inputs.force }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_LC_REF:-}" ]; then
+            lc_ref="${INPUT_LC_REF}"
+            latest=false
+          else
+            lc_ref="$(bash support/latest-tag.sh)"
+            latest=true
+          fi
+
+          # Patch revision: content hash of everything that changes what gets built
+          # on top of upstream. README edits etc. do not trigger a rebuild.
+          rev="$( { cat patches/series; \
+                    find patches -name '*.patch' -type f | LC_ALL=C sort | xargs -r cat; \
+                    cat support/apply-patches.sh; } | sha256sum | cut -c1-12 )"
+
+          publish=false
+          if [ "${GITHUB_EVENT_NAME}" != pull_request ] && [ "${GITHUB_REF}" = "refs/heads/${DEFAULT_BRANCH}" ]; then
+            publish=true
+          fi
+
+          has_work=true
+          if [ "${publish}" = true ] && [ "${INPUT_FORCE:-false}" != true ]; then
+            echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin >/dev/null
+            if docker manifest inspect "${IMAGE}:${lc_ref}-${rev}" >/dev/null 2>&1; then
+              echo "::notice::${IMAGE}:${lc_ref}-${rev} already published -- nothing to do."
+              has_work=false
+            fi
+          fi
+
+          amd64='{"arch":"amd64","runner":"ubuntu-26.04"}'
+          arm64='{"arch":"arm64","runner":"ubuntu-26.04-arm"}'
+          if [ "${publish}" = true ]; then
+            matrix="{\"include\":[${amd64},${arm64}]}"
+          else
+            matrix="{\"include\":[${amd64}]}"
+          fi
+
+          {
+            echo "lc_ref=${lc_ref}"
+            echo "rev=${rev}"
+            echo "publish=${publish}"
+            echo "latest=${latest}"
+            echo "has_work=${has_work}"
+            echo "matrix=${matrix}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### LibreChat \`${lc_ref}\` + patches \`${rev}\`"
+            echo "- publish: ${publish}"
+            echo "- has_work: ${has_work}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: resolve
+    if: needs.resolve.outputs.has_work == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      LC_REF: ${{ needs.resolve.outputs.lc_ref }}
+      REV: ${{ needs.resolve.outputs.rev }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clone LibreChat
+        run: |
+          echo "Cloning LibreChat '${LC_REF}'"
+          git clone --depth 1 --branch "${LC_REF}" "https://github.com/${LC_GH_REPO}.git" librechat
+
+      - name: Install quilt
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends quilt
+
+      - name: Apply patches (fuzz=0)
+        run: bash support/apply-patches.sh librechat
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker buildx build librechat \
+            --target node \
+            --load \
+            --tag "librechat-patched:ci" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${LC_REF}-${REV}" \
+            --label "org.opencontainers.image.base.name=${GITHUB_SERVER_URL}/${LC_GH_REPO}@${LC_REF}"
+
+      - name: Smoke test
+        run: bash support/smoke.sh librechat-patched:ci
+
+      - name: Log in to GHCR
+        if: needs.resolve.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push per-arch image
+        if: needs.resolve.outputs.publish == 'true'
+        run: |
+          tag="${IMAGE}:${LC_REF}-${REV}-${ARCH}"
+          docker tag librechat-patched:ci "${tag}"
+          docker push "${tag}"
+
+  manifest:
+    name: Publish multi-arch manifest
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true' && needs.resolve.outputs.has_work == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      LC_REF: ${{ needs.resolve.outputs.lc_ref }}
+      REV: ${{ needs.resolve.outputs.rev }}
+      LATEST: ${{ needs.resolve.outputs.latest }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create manifest
+        run: |
+          set -euo pipefail
+          tags=(--tag "${IMAGE}:${LC_REF}-${REV}" --tag "${IMAGE}:${LC_REF}")
+          if [ "${LATEST}" = true ]; then
+            tags+=(--tag "${IMAGE}:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "${IMAGE}:${LC_REF}-${REV}-amd64" \
+            "${IMAGE}:${LC_REF}-${REV}-arm64"
+          docker buildx imagetools inspect "${IMAGE}:${LC_REF}-${REV}"

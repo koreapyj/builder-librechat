@@ -1,0 +1,31 @@
+# Minimal stack to boot a LibreChat image for smoke tests and manual runs.
+# Driven by support/smoke.sh and `make run`; secrets come from the environment.
+name: librechat-smoke
+
+services:
+  mongodb:
+    image: mongo:8.0
+    command: mongod --noauth
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    image: ${LIBRECHAT_IMAGE:?LIBRECHAT_IMAGE is required}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "${LIBRECHAT_PORT:-3080}:3080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3080"
+      MONGO_URI: mongodb://mongodb:27017/LibreChat
+      CREDS_KEY: ${CREDS_KEY:?CREDS_KEY is required}
+      CREDS_IV: ${CREDS_IV:?CREDS_IV is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      SEARCH: "false"
+      ALLOW_REGISTRATION: "true"
