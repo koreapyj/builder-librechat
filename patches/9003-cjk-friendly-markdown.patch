@@ -1,0 +1,724 @@
+--- a/client/jest.config.cjs
++++ b/client/jest.config.cjs
+@@ -51,7 +51,7 @@ module.exports = {
+       'jest-file-loader',
+   },
+   transformIgnorePatterns: [
+-    '/node_modules/(?!(@ariakit/react-components|@ariakit/react-utils|@ariakit/react-store|@ariakit/components|@ariakit/store|@ariakit/utils|@zattoo/use-double-click|@dicebear|@react-dnd|react-dnd.*|dnd-core|filenamify|filename-reserved-regex|heic-to|lowlight|highlight\\.js|fault|lucide-react|lucide|morphicons|react-markdown|unified|bail|trough|devlop|is-.*|parse-entities|stringify-entities|character-.*|trim-lines|style-to-object|inline-style-parser|html-url-attributes|escape-string-regexp|longest-streak|zwitch|ccount|markdown-table|comma-separated-tokens|space-separated-tokens|web-namespaces|property-information|remark-.*|rehype-.*|recma-.*|hast.*|mdast-.*|unist-.*|vfile.*|micromark.*|estree-util-.*|decode-named-character-reference)/)/',
++    '/node_modules/(?!(@ariakit/react-components|@ariakit/react-utils|@ariakit/react-store|@ariakit/components|@ariakit/store|@ariakit/utils|@zattoo/use-double-click|@dicebear|@react-dnd|react-dnd.*|dnd-core|filenamify|filename-reserved-regex|heic-to|lowlight|highlight\\.js|fault|lucide-react|lucide|morphicons|react-markdown|unified|bail|trough|devlop|is-.*|parse-entities|stringify-entities|character-.*|trim-lines|style-to-object|inline-style-parser|html-url-attributes|escape-string-regexp|longest-streak|zwitch|ccount|markdown-table|comma-separated-tokens|space-separated-tokens|web-namespaces|property-information|remark-.*|rehype-.*|recma-.*|hast.*|mdast-.*|unist-.*|vfile.*|micromark.*|estree-util-.*|decode-named-character-reference|get-east-asian-width)/)/',
+   ],
+   setupFiles: ['<rootDir>/test/polyfills.js'],
+   setupFilesAfterEnv: ['@testing-library/jest-dom/extend-expect', '<rootDir>/test/setupTests.js'],
+--- a/client/package.json
++++ b/client/package.json
+@@ -88,6 +88,8 @@
+     "mdast-util-gfm": "^3.0.0",
+     "mdast-util-math": "^3.0.0",
+     "mermaid": "^11.17.2",
++    "micromark-extension-cjk-friendly": "2.0.2",
++    "micromark-extension-cjk-friendly-gfm-strikethrough": "2.0.1",
+     "micromark-extension-directive": "^3.0.1",
+     "micromark-extension-gfm": "^3.0.0",
+     "micromark-extension-llm-math": "^3.1.0",
+@@ -122,7 +124,6 @@
+     "remark-directive": "^3.0.0",
+     "remark-gfm": "^4.0.0",
+     "remark-math": "^6.0.0",
+-    "remark-supersub": "^1.0.0",
+     "sse.js": "^2.8.0",
+     "swr": "^2.3.8",
+     "tailwind-merge": "^1.9.1",
+--- a/client/src/components/Chat/Messages/Content/MarkdownErrorBoundary.tsx
++++ b/client/src/components/Chat/Messages/Content/MarkdownErrorBoundary.tsx
+@@ -1,11 +1,10 @@
+ import React from 'react';
+-import remarkGfm from 'remark-gfm';
+-import supersub from 'remark-supersub';
+ import ReactMarkdown from 'react-markdown';
+ import rehypeHighlight from 'rehype-highlight';
+ import type { PluggableList } from 'unified';
+ import { code, codeNoExecution, a, p, img, table } from './MarkdownComponents';
+-import { langSubset, remarkApproxTilde } from '~/utils';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
++import { langSubset } from '~/utils';
+ import { CodeBlockProvider } from '~/Providers';
+ 
+ interface ErrorBoundaryState {
+@@ -60,12 +59,8 @@ class MarkdownErrorBoundary extends Reac
+       return (
+         <CodeBlockProvider>
+           <ReactMarkdown
+-            remarkPlugins={[
+-              remarkApproxTilde,
+-              /** @ts-ignore */
+-              supersub,
+-              remarkGfm,
+-            ]}
++            /** @ts-ignore - PluggableList vs Pluggable[] shape drift */
++            remarkPlugins={gfmRemarkPlugins}
+             /** @ts-ignore */
+             rehypePlugins={rehypePlugins}
+             components={
+--- a/client/src/components/Chat/Messages/Content/MarkdownLite.tsx
++++ b/client/src/components/Chat/Messages/Content/MarkdownLite.tsx
+@@ -1,15 +1,14 @@
+ import { memo } from 'react';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+ import rehypeKatex from 'rehype-katex';
+-import supersub from 'remark-supersub';
+ import ReactMarkdown from 'react-markdown';
+ import rehypeHighlight from 'rehype-highlight';
+ import type { PluggableList } from 'unified';
+ import { code, codeNoExecution, a, p, img, table } from './MarkdownComponents';
+ import { CodeBlockProvider, ArtifactProvider } from '~/Providers';
+ import MarkdownErrorBoundary from './MarkdownErrorBoundary';
+-import { langSubset, remarkApproxTilde } from '~/utils';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
++import { langSubset } from '~/utils';
+ 
+ const MarkdownLite = memo(
+   ({ content = '', codeExecution = true }: { content?: string; codeExecution?: boolean }) => {
+@@ -30,13 +29,8 @@ const MarkdownLite = memo(
+         <ArtifactProvider>
+           <CodeBlockProvider>
+             <ReactMarkdown
+-              remarkPlugins={[
+-                remarkApproxTilde,
+-                /** @ts-ignore */
+-                supersub,
+-                remarkGfm,
+-                [remarkMath, { singleDollarTextMath: false }],
+-              ]}
++              /** @ts-ignore - PluggableList vs Pluggable[] shape drift */
++              remarkPlugins={[...gfmRemarkPlugins, [remarkMath, { singleDollarTextMath: false }]]}
+               /** @ts-ignore */
+               rehypePlugins={rehypePlugins}
+               components={
+--- a/client/src/components/Chat/Messages/Content/markdownConfig.ts
++++ b/client/src/components/Chat/Messages/Content/markdownConfig.ts
+@@ -1,7 +1,5 @@
+ import 'katex/contrib/mhchem';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+-import supersub from 'remark-supersub';
+ import rehypeKatex from 'rehype-katex';
+ import rehypeHighlight from 'rehype-highlight';
+ import remarkDirective from 'remark-directive';
+@@ -13,9 +11,10 @@ import {
+   MCPUIResourceCarousel,
+ } from '~/components/MCPUIResource';
+ import { Citation, CompositeCitation, HighlightedText } from '~/components/Web/Citation';
+-import { langSubset, remarkApproxTilde, remarkSingleDollarMath } from '~/utils';
++import { langSubset, remarkSingleDollarMath } from '~/utils';
+ import { Artifact, artifactPlugin } from '~/components/Artifacts/Artifact';
+ import { code, a, p, img, table } from './MarkdownComponents';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
+ import { unicodeCitation } from '~/components/Web';
+ 
+ /**
+@@ -37,9 +36,7 @@ import { unicodeCitation } from '~/compo
+  * (aliased to `micromark-extension-llm-math` in vite and jest config).
+  */
+ export const getRemarkPlugins = (latexParsing = true): PluggableList => [
+-  remarkApproxTilde,
+-  supersub,
+-  remarkGfm,
++  ...gfmRemarkPlugins,
+   remarkDirective,
+   artifactPlugin,
+   [remarkMath, { singleDollarTextMath: false }],
+--- a/client/src/components/Chat/Messages/Content/splitMarkdown.ts
++++ b/client/src/components/Chat/Messages/Content/splitMarkdown.ts
+@@ -92,12 +92,12 @@ const countWithin = (
+  * render pipeline relies on (GFM tables, container directives like
+  * `:::artifact:::`, and `$$` math), so top-level block boundaries match what
+  * react-markdown produces. Inline-only transforms (citations, MCP-UI markers,
+- * supersub, single-dollar math) never cross a top-level block, so they are
++ * CJK-friendly emphasis, single-dollar math) never cross a top-level block, so they are
+  * intentionally omitted.
+  */
+ const parseToMdast = (content: string): MdastNode =>
+   fromMarkdown(content, {
+-    extensions: [gfm(), directive(), math({ singleDollarTextMath: false })],
++    extensions: [gfm({ singleTilde: false }), directive(), math({ singleDollarTextMath: false })],
+     mdastExtensions: [gfmFromMarkdown(), directiveFromMarkdown(), mathFromMarkdown()],
+   }) as MdastNode;
+ 
+--- a/client/src/components/Prompts/display/PromptTextCard.tsx
++++ b/client/src/components/Prompts/display/PromptTextCard.tsx
+@@ -1,13 +1,12 @@
+ import { useState, useCallback, useRef, useEffect } from 'react';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+ import { Copy, Check } from 'lucide';
+ import rehypeKatex from 'rehype-katex';
+-import supersub from 'remark-supersub';
+ import ReactMarkdown from 'react-markdown';
+ import rehypeHighlight from 'rehype-highlight';
+ import { Button, MorphIcon, TooltipAnchor, useToastContext } from '@librechat/client';
+ import { codeNoExecution } from '~/components/Chat/Messages/Content/MarkdownComponents';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
+ import { PromptVariableGfm } from '../editor/Markdown';
+ import { useLocalize } from '~/hooks';
+ 
+@@ -74,12 +73,8 @@ const PromptTextCard = ({ mainText }: Pr
+       </div>
+       <div className="min-h-0 flex-1 overflow-y-auto p-3">
+         <ReactMarkdown
+-          remarkPlugins={[
+-            /** @ts-ignore */
+-            supersub,
+-            remarkGfm,
+-            [remarkMath, { singleDollarTextMath: false }],
+-          ]}
++          /** @ts-ignore - PluggableList vs Pluggable[] shape drift */
++          remarkPlugins={[...gfmRemarkPlugins, [remarkMath, { singleDollarTextMath: false }]]}
+           rehypePlugins={[
+             /** @ts-ignore */
+             [rehypeKatex],
+--- a/client/src/components/Prompts/editor/PromptEditor.tsx
++++ b/client/src/components/Prompts/editor/PromptEditor.tsx
+@@ -1,8 +1,6 @@
+ import { useRef, useMemo, memo } from 'react';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+ import rehypeKatex from 'rehype-katex';
+-import supersub from 'remark-supersub';
+ import ReactMarkdown from 'react-markdown';
+ import rehypeHighlight from 'rehype-highlight';
+ import { EditIcon, Check } from 'lucide-react';
+@@ -10,6 +8,7 @@ import { Controller, useFormContext } fr
+ import { TextareaAutosize, Button, TooltipAnchor } from '@librechat/client';
+ import type { PluggableList } from 'unified';
+ import { codeNoExecution } from '~/components/Chat/Messages/Content/MarkdownComponents';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
+ import VariablesDropdown from './VariablesDropdown';
+ import { PromptVariableGfm } from './Markdown';
+ import { cn, langSubset } from '~/utils';
+@@ -121,9 +120,9 @@ const PromptEditor: React.FC<Props> = ({
+                 ) : (
+                   <ReactMarkdown
+                     remarkPlugins={[
+-                      /** @ts-ignore */
+-                      supersub,
+-                      remarkGfm,
++                      /** @ts-ignore - PluggableList vs Pluggable[] shape drift */
++                      ...gfmRemarkPlugins,
++                      /** @ts-ignore - PluggableList vs Pluggable[] shape drift */
+                       [remarkMath, { singleDollarTextMath: false }],
+                     ]}
+                     /** @ts-ignore */
+--- a/client/src/components/Prompts/forms/VariableForm.tsx
++++ b/client/src/components/Prompts/forms/VariableForm.tsx
+@@ -1,7 +1,5 @@
+ import { useMemo } from 'react';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+-import supersub from 'remark-supersub';
+ import rehypeKatex from 'rehype-katex';
+ import ReactMarkdown from 'react-markdown';
+ import rehypeHighlight from 'rehype-highlight';
+@@ -10,6 +8,7 @@ import { TextareaAutosize, InputCombobox
+ import { useForm, useFieldArray, Controller, useWatch } from 'react-hook-form';
+ import type { TPromptGroup } from 'librechat-data-provider';
+ import { codeNoExecution } from '~/components/Chat/Messages/Content/MarkdownComponents';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
+ import { cn, wrapVariable, defaultTextProps, extractVariableInfo } from '~/utils';
+ import { useAuthContext, useLocalize, useSubmitMessage } from '~/hooks';
+ import { useRecordPromptUsage } from '~/data-provider';
+@@ -148,7 +147,7 @@ export default function VariableForm({
+         <div className="mb-6 max-h-screen max-w-[80vw] overflow-auto rounded-md bg-surface-tertiary p-4 text-text-secondary sm:max-w-full md:max-h-96">
+           <ReactMarkdown
+             /** @ts-ignore */
+-            remarkPlugins={[supersub, remarkGfm, [remarkMath, { singleDollarTextMath: false }]]}
++            remarkPlugins={[...gfmRemarkPlugins, [remarkMath, { singleDollarTextMath: false }]]}
+             rehypePlugins={[
+               /** @ts-ignore */
+               [rehypeKatex],
+--- a/client/src/components/Skills/display/SkillMarkdownRenderer.tsx
++++ b/client/src/components/Skills/display/SkillMarkdownRenderer.tsx
+@@ -1,8 +1,6 @@
+ import { memo, useMemo } from 'react';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+ import rehypeKatex from 'rehype-katex';
+-import supersub from 'remark-supersub';
+ import { Link } from 'react-router-dom';
+ import rehypeHighlight from 'rehype-highlight';
+ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+@@ -10,11 +8,11 @@ import type { AnchorHTMLAttributes } fro
+ import type { PluggableList } from 'unified';
+ import type { Element } from 'hast';
+ import { codeNoExecution } from '~/components/Chat/Messages/Content/MarkdownComponents';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
+ import { langSubset } from '~/utils';
+ 
+ const REMARK_PLUGINS: PluggableList = [
+-  supersub,
+-  remarkGfm,
++  ...gfmRemarkPlugins,
+   [remarkMath, { singleDollarTextMath: false }],
+ ];
+ 
+--- a/client/src/components/Skills/forms/SkillContentEditor.tsx
++++ b/client/src/components/Skills/forms/SkillContentEditor.tsx
+@@ -1,8 +1,6 @@
+ import { memo } from 'react';
+-import remarkGfm from 'remark-gfm';
+ import remarkMath from 'remark-math';
+ import rehypeKatex from 'rehype-katex';
+-import supersub from 'remark-supersub';
+ import { Check, SquarePen } from 'lucide';
+ import ReactMarkdown from 'react-markdown';
+ import rehypeHighlight from 'rehype-highlight';
+@@ -11,12 +9,12 @@ import { TextareaAutosize, Button, Morph
+ import type { RegisterOptions } from 'react-hook-form';
+ import type { PluggableList } from 'unified';
+ import { codeNoExecution } from '~/components/Chat/Messages/Content/MarkdownComponents';
++import { gfmRemarkPlugins } from '~/utils/markdownExtensions';
+ import { cn, langSubset } from '~/utils';
+ import { useLocalize } from '~/hooks';
+ 
+ const REMARK_PLUGINS: PluggableList = [
+-  supersub,
+-  remarkGfm,
++  ...gfmRemarkPlugins,
+   [remarkMath, { singleDollarTextMath: false }],
+ ];
+ 
+--- a/client/src/utils/artifacts.ts
++++ b/client/src/utils/artifacts.ts
+@@ -1,6 +1,5 @@
+ import dedent from 'dedent';
+ import filenamify from 'filenamify';
+-import { gfm } from 'micromark-extension-gfm';
+ import { gfmFromMarkdown } from 'mdast-util-gfm';
+ import { fromMarkdown } from 'mdast-util-from-markdown';
+ import {
+@@ -17,6 +16,7 @@ import type { PhrasingContent } from 'md
+ import type { TranslationKeys } from '~/hooks/useLocalize';
+ import type { Artifact } from '~/common';
+ import { MERMAID_ARTIFACT_TYPE } from '~/common/artifacts';
++import { gfmMicromarkExtensions } from './markdownExtensions';
+ import { getCodeBlockFilename } from './downloadFile';
+ 
+ const artifactFilename = {
+@@ -164,7 +164,7 @@ export function getArtifactDownloadFilen
+       '',
+     );
+     const heading = fromMarkdown(markdown, {
+-      extensions: [gfm()],
++      extensions: gfmMicromarkExtensions(),
+       mdastExtensions: [gfmFromMarkdown()],
+     }).children.find((node) => node.type === 'heading');
+     if (heading?.type === 'heading') {
+--- /dev/null
++++ b/client/src/utils/markdownExtensions.ts
+@@ -0,0 +1,53 @@
++import remarkGfm from 'remark-gfm';
++import { gfm } from 'micromark-extension-gfm';
++import { cjkFriendlyExtension } from 'micromark-extension-cjk-friendly';
++import { gfmStrikethroughCjkFriendly } from 'micromark-extension-cjk-friendly-gfm-strikethrough';
++import type { Extension as MicromarkExtension } from 'micromark-util-types';
++import type { PluggableList, Plugin } from 'unified';
++import type { Root } from 'mdast';
++
++interface ParserData {
++  micromarkExtensions?: MicromarkExtension[];
++}
++
++/**
++ * CJK-friendly emphasis: lets `**…(괄호)**이` close before a Korean particle, which the
++ * CommonMark flanking rules reject when the closer follows punctuation. Same parse-only
++ * registration as `remark-cjk-friendly/parseOnly`, without its `unified@11` peer, which
++ * would install a second unified/unist type tree under the client workspace.
++ */
++const remarkCjkFriendly: Plugin<[], Root> = function remarkCjkFriendly() {
++  const data = this.data() as ParserData;
++  (data.micromarkExtensions ??= []).push(cjkFriendlyExtension());
++};
++
++/** CJK-friendly `~~` strikethrough; see {@link remarkCjkFriendly} for why it is local. */
++const remarkCjkFriendlyGfmStrikethrough: Plugin<[], Root> =
++  function remarkCjkFriendlyGfmStrikethrough() {
++    const data = this.data() as ParserData;
++    (data.micromarkExtensions ??= []).push(gfmStrikethroughCjkFriendly({ singleTilde: false }));
++  };
++
++/**
++ * GFM with only the spec's `~~` strikethrough, plus CJK-friendly emphasis and strikethrough.
++ *
++ * `singleTilde: false` everywhere: a lone `~` is a range (`10~20명`) or "approximately"
++ * (`~50%`) in model output, never strikethrough. The CJK strikethrough extension registers
++ * its own strikethrough construct, so it needs the same option or single-tilde ranges
++ * come back.
++ *
++ * Subscript/superscript syntax (`~x~`, `^x^`) is intentionally not supported; math
++ * (`$H_2O$`, `$x^2$`) covers it.
++ */
++export const gfmRemarkPlugins: PluggableList = [
++  [remarkGfm, { singleTilde: false }],
++  remarkCjkFriendly,
++  remarkCjkFriendlyGfmStrikethrough,
++];
++
++/** The micromark extensions behind `gfmRemarkPlugins`, in the same order, for `fromMarkdown`. */
++export const gfmMicromarkExtensions = (): MicromarkExtension[] => [
++  gfm({ singleTilde: false }),
++  cjkFriendlyExtension(),
++  gfmStrikethroughCjkFriendly({ singleTilde: false }),
++];
+--- a/client/src/utils/richtext.spec.ts
++++ b/client/src/utils/richtext.spec.ts
+@@ -80,15 +80,41 @@ describe('markdownToHtml', () => {
+     );
+   });
+ 
+-  it('applies the supersub transform the renderers apply', () => {
+-    expect(markdownToHtml('x^2^ is squared')).toBe('<p>x<sup>2</sup> is squared</p>');
+-    expect(markdownToHtml('x^2^ is squared', { variant: 'lite', latex: false })).toBe(
+-      '<p>x<sup>2</sup> is squared</p>',
+-    );
++  describe.each([
++    { variant: 'full', latex: true },
++    { variant: 'lite', latex: false },
++  ] as const)('matches the CJK-friendly renderers ($variant)', (mode) => {
++    it.each([
++      ['10~20명, 30~40만원', '<p>10~20명, 30~40만원</p>'],
++      ['수 KB~MB와 96GB~192GB급', '<p>수 KB~MB와 96GB~192GB급</p>'],
++      ['약 ~50% 증가, ~10% 감소', '<p>약 ~50% 증가, ~10% 감소</p>'],
++      [
++        '**최소 8장(총 256GB VRAM)**이 필요',
++        '<p><strong>최소 8장(총 256GB VRAM)</strong>이 필요</p>',
++      ],
++      ['*강조(괄호)*는 기울임', '<p><em>강조(괄호)</em>는 기울임</p>'],
++      ['~~취소(괄호)~~를 표시', '<p><s>취소(괄호)</s>를 표시</p>'],
++      ['~~취소~~ 일반 취소선', '<p><s>취소</s> 일반 취소선</p>'],
++      ['2^10에서 2^20까지', '<p>2^10에서 2^20까지</p>'],
++      ['x^2^ 와 H~2~O', '<p>x^2^ 와 H~2~O</p>'],
++    ])('%s', (input, html) => {
++      expect(markdownToHtml(input, mode)).toBe(html);
++    });
++
++    it('keeps tildes in inline code and in a link label verbatim', () => {
++      const html = markdownToHtml('코드 `a~b~c` 와 https://example.com/~user/a~b', mode);
++      expect(html).toContain('>a~b~c</code>');
++      expect(html).toContain(
++        '<a href="https://example.com/~user/a~b">https://example.com/~user/a~b</a>',
++      );
++      expect(html).not.toMatch(/<su[bp]>|<s>|∼/);
++    });
+   });
+ 
+-  it('leaves an approximate tilde out of the subscript pairing', () => {
+-    expect(markdownToHtml('about ~50% of the time')).toBe('<p>about ∼50% of the time</p>');
++  it('keeps both inline formulas as their LaTeX source when LaTeX parsing is on', () => {
++    expect(markdownToHtml('수식 $H_2O$ 와 $x^2$', { variant: 'full', latex: true })).toBe(
++      '<p>수식 H_2O 와 x^2</p>',
++    );
+   });
+ 
+   it('absolutizes relative links and images so they survive the paste', () => {
+--- a/client/src/utils/richtext.ts
++++ b/client/src/utils/richtext.ts
+@@ -1,5 +1,3 @@
+-import supersub from 'remark-supersub';
+-import { gfm } from 'micromark-extension-gfm';
+ import { math } from 'micromark-extension-math';
+ import { gfmFromMarkdown } from 'mdast-util-gfm';
+ import { mathFromMarkdown } from 'mdast-util-math';
+@@ -13,13 +11,12 @@ import type {
+   Definition,
+   FootnoteDefinition,
+   ListItem,
+-  Root,
+   RootContent,
+   Table,
+ } from 'mdast';
+ import type { Extension as MicromarkExtension } from 'micromark-util-types';
+ import { mcpUIResourcePlugin } from '~/components/MCPUIResource/plugin';
+-import { remarkApproxTilde } from './tilde';
++import { gfmMicromarkExtensions } from './markdownExtensions';
+ import { singleDollarMath } from './latex';
+ 
+ /**
+@@ -43,26 +40,12 @@ export type RichTextMode = {
+   reserved?: ReadonlySet<string>;
+ };
+ 
+-/**
+- * `remark-supersub` is typed as a unified `Transformer`, which declares a
+- * `file` and a `next` the plugin never reads: it only walks the tree. Narrowing
+- * those to optional arguments lets it be called as the plain mdast transform it
+- * is, so this copy stays on exactly the transform the renderers apply.
+- */
+-const applySuperSub = supersub() as (tree: Root, file?: unknown, next?: unknown) => void;
+-
+-/** `remark-supersub` produces these outside of mdast's own node set. */
+-type SuperSubNode = {
+-  type: 'superscript' | 'subscript';
+-  children: SerializableNode[];
+-};
+-
+ /** `mcpUIResourcePlugin` produces these in place of its own protocol markers. */
+ type McpResourceNode = {
+   type: 'mcp-ui-resource' | 'mcp-ui-carousel';
+ };
+ 
+-type SerializableNode = RootContent | SuperSubNode | McpResourceNode;
++type SerializableNode = RootContent | McpResourceNode;
+ 
+ const MONOSPACE = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+ 
+@@ -300,10 +283,6 @@ function serializeNode(node: Serializabl
+       return `<em>${serializeChildren(node.children, context)}</em>`;
+     case 'delete':
+       return `<s>${serializeChildren(node.children, context)}</s>`;
+-    case 'superscript':
+-      return `<sup>${serializeChildren(node.children, context)}</sup>`;
+-    case 'subscript':
+-      return `<sub>${serializeChildren(node.children, context)}</sub>`;
+     case 'inlineCode':
+       return `<code style="${STYLES.inlineCode}">${escapeHtml(node.value)}</code>`;
+     case 'code':
+@@ -404,17 +383,19 @@ function serializeChildren(nodes: readon
+  * the clipboard as `text/html`. Paste targets that ignore Markdown (Teams,
+  * Outlook, Word) strip stylesheets, so every visual cue has to be inline.
+  *
+- * Parsing mirrors the message renderers: the same currency-safe single-dollar
+- * math extension, the same `micromark-extension-math` with `singleDollarTextMath`
+- * off so currency such as `$5 to $10` stays currency, then the same
+- * `remarkApproxTilde` and `remark-supersub` transforms they apply to the parsed
+- * tree.
++ * Parsing mirrors the message renderers: the same GFM and CJK-friendly
++ * emphasis/strikethrough extensions (`~~` only), the same currency-safe
++ * single-dollar math extension, and the same `micromark-extension-math` with
++ * `singleDollarTextMath` off so currency such as `$5 to $10` stays currency.
+  */
+ export function markdownToHtml(
+   markdown: string,
+   mode: RichTextMode = { variant: 'full', latex: false },
+ ): string {
+-  const extensions: MicromarkExtension[] = [gfm(), math({ singleDollarTextMath: false })];
++  const extensions: MicromarkExtension[] = [
++    ...gfmMicromarkExtensions(),
++    math({ singleDollarTextMath: false }),
++  ];
+   if (mode.variant === 'full') {
+     extensions.push(directive());
+   }
+@@ -427,8 +408,6 @@ export function markdownToHtml(
+     mdastExtensions: [gfmFromMarkdown(), directiveFromMarkdown(), mathFromMarkdown()],
+   });
+ 
+-  remarkApproxTilde()(tree);
+-  applySuperSub(tree);
+   if (mode.variant === 'full') {
+     mcpUIResourcePlugin()(tree);
+   }
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -917,6 +917,8 @@
+         "mdast-util-gfm": "^3.0.0",
+         "mdast-util-math": "^3.0.0",
+         "mermaid": "^11.17.2",
++        "micromark-extension-cjk-friendly": "2.0.2",
++        "micromark-extension-cjk-friendly-gfm-strikethrough": "2.0.1",
+         "micromark-extension-directive": "^3.0.1",
+         "micromark-extension-gfm": "^3.0.0",
+         "micromark-extension-llm-math": "^3.1.0",
+@@ -951,7 +953,6 @@
+         "remark-directive": "^3.0.0",
+         "remark-gfm": "^4.0.0",
+         "remark-math": "^6.0.0",
+-        "remark-supersub": "^1.0.0",
+         "sse.js": "^2.8.0",
+         "swr": "^2.3.8",
+         "tailwind-merge": "^1.9.1",
+@@ -25672,7 +25673,6 @@
+       "version": "1.6.0",
+       "resolved": "https://registry.npmjs.org/get-east-asian-width/-/get-east-asian-width-1.6.0.tgz",
+       "integrity": "sha512-QRbvDIbx6YklUe6RxeTeleMR0yv3cYH6PsPZHcnVn7xv7zO1BHN8r0XETu8n6Ye3Q+ahtSarc3WgtNWmehIBfA==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=18"
+@@ -31666,6 +31666,77 @@
+         "micromark-util-types": "^2.0.0"
+       }
+     },
++    "node_modules/micromark-extension-cjk-friendly": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/micromark-extension-cjk-friendly/-/micromark-extension-cjk-friendly-2.0.2.tgz",
++      "integrity": "sha512-/BqZNCkDWg3Hj9zEEcRitZ5uMF3X78qmBFuP17oAjnVDZ0+H1GHiDKMJZDpJsXasCHEn/kzl6QHozUiWgCHtPQ==",
++      "license": "MIT",
++      "dependencies": {
++        "devlop": "^1.1.0",
++        "micromark-extension-cjk-friendly-util": "3.0.1",
++        "micromark-util-chunked": "^2.0.1",
++        "micromark-util-resolve-all": "^2.0.1",
++        "micromark-util-symbol": "^2.0.1"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "micromark": "^4.0.0",
++        "micromark-util-types": "^2.0.0"
++      },
++      "peerDependenciesMeta": {
++        "micromark-util-types": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/micromark-extension-cjk-friendly-gfm-strikethrough": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-extension-cjk-friendly-gfm-strikethrough/-/micromark-extension-cjk-friendly-gfm-strikethrough-2.0.1.tgz",
++      "integrity": "sha512-wVC0zwjJNqQeX+bb07YTPu/CvSAyCTafyYb7sMhX1r62/Lw5M/df3JyYaANyp8g15c1ypJRFSsookTqA1IDsUg==",
++      "license": "MIT",
++      "dependencies": {
++        "devlop": "^1.1.0",
++        "get-east-asian-width": "^1.4.0",
++        "micromark-extension-cjk-friendly-util": "3.0.1",
++        "micromark-util-character": "^2.1.1",
++        "micromark-util-chunked": "^2.0.1",
++        "micromark-util-resolve-all": "^2.0.1",
++        "micromark-util-symbol": "^2.0.1"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependencies": {
++        "micromark": "^4.0.0",
++        "micromark-util-types": "^2.0.0"
++      },
++      "peerDependenciesMeta": {
++        "micromark-util-types": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/micromark-extension-cjk-friendly-util": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-extension-cjk-friendly-util/-/micromark-extension-cjk-friendly-util-3.0.1.tgz",
++      "integrity": "sha512-GcbXqTTHOsiZHyF753oIddP/J2eH8j9zpyQPhkof6B2JNxfEJabnQqxbCgzJNuNes0Y2jTNJ3LiYPSXr6eJA8w==",
++      "license": "MIT",
++      "dependencies": {
++        "get-east-asian-width": "^1.4.0",
++        "micromark-util-character": "^2.1.1",
++        "micromark-util-symbol": "^2.0.1"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "peerDependenciesMeta": {
++        "micromark-util-types": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/micromark-extension-directive": {
+       "version": "3.0.1",
+       "resolved": "https://registry.npmjs.org/micromark-extension-directive/-/micromark-extension-directive-3.0.1.tgz",
+@@ -31938,9 +32009,9 @@
+       }
+     },
+     "node_modules/micromark-util-character": {
+-      "version": "2.1.0",
+-      "resolved": "https://registry.npmjs.org/micromark-util-character/-/micromark-util-character-2.1.0.tgz",
+-      "integrity": "sha512-KvOVV+X1yLBfs9dCBSopq/+G1PcgT3lAK07mC4BzXi5E7ahzMAF8oIupDDJ6mievI6F+lAATkbQQlQixJfT3aQ==",
++      "version": "2.1.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-character/-/micromark-util-character-2.1.1.tgz",
++      "integrity": "sha512-wv8tdUTJ3thSFFFJKtpYKOYiGP2+v96Hvk4Tu8KpCAsTMs6yi+nVmGh1syvSCsaxz45J6Jbw+9DD6g97+NV67Q==",
+       "funding": [
+         {
+           "type": "GitHub Sponsors",
+@@ -31951,15 +32022,16 @@
+           "url": "https://opencollective.com/unified"
+         }
+       ],
++      "license": "MIT",
+       "dependencies": {
+         "micromark-util-symbol": "^2.0.0",
+         "micromark-util-types": "^2.0.0"
+       }
+     },
+     "node_modules/micromark-util-chunked": {
+-      "version": "2.0.0",
+-      "resolved": "https://registry.npmjs.org/micromark-util-chunked/-/micromark-util-chunked-2.0.0.tgz",
+-      "integrity": "sha512-anK8SWmNphkXdaKgz5hJvGa7l00qmcaUQoMYsBwDlSKFKjc6gjGXPDw3FNL3Nbwq5L8gE+RCbGqTw49FK5Qyvg==",
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-chunked/-/micromark-util-chunked-2.0.1.tgz",
++      "integrity": "sha512-QUNFEOPELfmvv+4xiNg2sRYeS/P84pTW0TCgP5zc9FpXetHY0ab7SxKyAQCNCc1eK0459uoLI1y5oO5Vc1dbhA==",
+       "funding": [
+         {
+           "type": "GitHub Sponsors",
+@@ -31970,6 +32042,7 @@
+           "url": "https://opencollective.com/unified"
+         }
+       ],
++      "license": "MIT",
+       "dependencies": {
+         "micromark-util-symbol": "^2.0.0"
+       }
+@@ -32101,9 +32174,9 @@
+       }
+     },
+     "node_modules/micromark-util-resolve-all": {
+-      "version": "2.0.0",
+-      "resolved": "https://registry.npmjs.org/micromark-util-resolve-all/-/micromark-util-resolve-all-2.0.0.tgz",
+-      "integrity": "sha512-6KU6qO7DZ7GJkaCgwBNtplXCvGkJToU86ybBAUdavvgsCiG8lSSvYxr9MhwmQ+udpzywHsl4RpGJsYWG1pDOcA==",
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-resolve-all/-/micromark-util-resolve-all-2.0.1.tgz",
++      "integrity": "sha512-VdQyxFWFT2/FGJgwQnJYbe1jjQoNTS4RjglmSjTUlpUMa95Htx9NHeYW4rGDJzbjvCsl9eLjMQwGeElsqmzcHg==",
+       "funding": [
+         {
+           "type": "GitHub Sponsors",
+@@ -32114,6 +32187,7 @@
+           "url": "https://opencollective.com/unified"
+         }
+       ],
++      "license": "MIT",
+       "dependencies": {
+         "micromark-util-types": "^2.0.0"
+       }
+@@ -32160,9 +32234,9 @@
+       }
+     },
+     "node_modules/micromark-util-symbol": {
+-      "version": "2.0.0",
+-      "resolved": "https://registry.npmjs.org/micromark-util-symbol/-/micromark-util-symbol-2.0.0.tgz",
+-      "integrity": "sha512-8JZt9ElZ5kyTnO94muPxIGS8oyElRJaiJO8EzV6ZSyGQ1Is8xwl4Q45qU5UOg+bGH4AikWziz0iN4sFLWs8PGw==",
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-symbol/-/micromark-util-symbol-2.0.1.tgz",
++      "integrity": "sha512-vs5t8Apaud9N28kgCrRUdEed4UJ+wWNvicHLPxCa9ENlYuAY31M0ETy5y1vA33YoNPDFTghEbnh6efaE8h4x0Q==",
+       "funding": [
+         {
+           "type": "GitHub Sponsors",
+@@ -32172,7 +32246,8 @@
+           "type": "OpenCollective",
+           "url": "https://opencollective.com/unified"
+         }
+-      ]
++      ],
++      "license": "MIT"
+     },
+     "node_modules/micromark-util-types": {
+       "version": "2.0.0",
+@@ -37210,14 +37285,6 @@
+         "url": "https://opencollective.com/unified"
+       }
+     },
+-    "node_modules/remark-supersub": {
+-      "version": "1.0.0",
+-      "resolved": "https://registry.npmjs.org/remark-supersub/-/remark-supersub-1.0.0.tgz",
+-      "integrity": "sha512-3SYsphMqpAWbr8AZozdcypozinl/lly3e7BEwPG3YT5J9uZQaDcELBF6/sr/OZoAlFxy2nhNFWSrZBu/ZPRT3Q==",
+-      "dependencies": {
+-        "unist-util-visit": "^4.0.0"
+-      }
+-    },
+     "node_modules/rematrix": {
+       "version": "0.2.2",
+       "resolved": "https://registry.npmjs.org/rematrix/-/rematrix-0.2.2.tgz",

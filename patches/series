@@ -5,3 +5,4 @@
 6002-calibration-token-count-tests.patch
 9001-docker-apply-pkg-patches.patch
 9002-keep-unavailable-model-and-warn.patch
+9003-cjk-friendly-markdown.patch
