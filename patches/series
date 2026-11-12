@@ -2,5 +2,6 @@
 0002-apply-reserve-ratio-once.patch
 0003-anthropic-provider-model-fetch.patch
 6001-pass-anthropic-provider-to-history-formatter.patch
+6002-calibration-token-count-tests.patch
 9001-docker-apply-pkg-patches.patch
 9002-keep-unavailable-model-and-warn.patch

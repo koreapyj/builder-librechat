@@ -1,0 +1,446 @@
+Index: src/packages/api/src/agents/calibration.spec.ts
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ src/packages/api/src/agents/calibration.spec.ts	2026-11-12 11:04:28.404881200 +0900
+@@ -0,0 +1,441 @@
++import { concat } from '@langchain/core/utils/stream';
++import { AIMessage, HumanMessage } from '@langchain/core/messages';
++import {
++  Providers,
++  StandardGraph,
++  getChatModelClass,
++  createPruneMessages,
++  formatAgentMessages,
++} from '@librechat/agents';
++import type { PruneMessagesParams, TokenCounter, TPayload } from '@librechat/agents';
++import type { AIMessageChunk, BaseMessage } from '@langchain/core/messages';
++import { hydrateMissingIndexTokenCounts } from '~/utils';
++import { createCachedTokenCounter } from './client';
++
++/**
++ * Calibration inputs (pkg-patches 007 + 008):
++ * - a stored assistant `tokenCount` is that turn's provider output_tokens (thinking included,
++ *   server tool results excluded), so history AI messages are recounted from what is re-sent;
++ * - a call whose usage reports `server_tool_use.*_requests > 0` sums input over internal
++ *   iterations and must not calibrate.
++ */
++
++const fakeEncrypted = (seed: string) => Buffer.from(seed.repeat(800)).toString('base64');
++const searchResults = (q: string) =>
++  JSON.stringify(
++    [1, 2, 3].map((i) => ({
++      type: 'web_search_result',
++      url: `https://example.com/${q}/${i}`,
++      title: `Example ${q} ${i}`,
++      encrypted_content: fakeEncrypted(`${q}${i}`),
++      page_age: null,
++    })),
++  );
++
++const serverSearchAssistant = {
++  role: 'assistant',
++  tokenCount: 3000,
++  content: [
++    { type: 'think', think: 'Long private reasoning. '.repeat(400) },
++    {
++      type: 'tool_call',
++      tool_call: { id: 'srvtoolu_01A', name: 'web_search', args: '', type: 'tool_call' },
++    },
++    {
++      type: 'tool_call',
++      tool_call: {
++        id: 'srvtoolu_01B',
++        name: 'web_search',
++        args: '{"query":"example"}',
++        type: 'tool_call',
++        output: searchResults('example'),
++      },
++    },
++    {
++      type: 'text',
++      text: 'Answer based on the search. '.repeat(40),
++      citations: [
++        {
++          type: 'web_search_result_location',
++          cited_text: 'quoted',
++          encrypted_index: 'EpABCioI-SAMPLE',
++          title: 'Example example 1',
++          url: 'https://example.com/example/1',
++        },
++      ],
++    },
++  ],
++};
++
++const thinkingOnlyAssistant = {
++  role: 'assistant',
++  tokenCount: 3000,
++  content: [
++    { type: 'think', think: 'Long private reasoning. '.repeat(400) },
++    { type: 'text', text: 'Short answer. '.repeat(40) },
++  ],
++};
++
++let tokenCounter: TokenCounter;
++beforeAll(async () => {
++  tokenCounter = await createCachedTokenCounter('claude');
++});
++
++/** Same order as AgentClient: format, then hydrate the unset indices. */
++function formatAndHydrate(payload: TPayload, storedCounts: Record<number, number>) {
++  const formatted = formatAgentMessages(payload, storedCounts, new Set(['set_memory']), undefined, {
++    provider: Providers.ANTHROPIC,
++  });
++  const hydrated = hydrateMissingIndexTokenCounts({
++    messages: formatted.messages,
++    indexTokenCountMap: formatted.indexTokenCountMap,
++    tokenCounter,
++  });
++  return { formatted, hydrated };
++}
++
++describe('history assistant token counts', () => {
++  it('counts a restored server search turn by what is re-sent, not the stored output tokens', () => {
++    const payload = [
++      { role: 'user', content: 'q' },
++      serverSearchAssistant,
++      { role: 'user', content: 'next' },
++    ] as unknown as TPayload;
++    const { formatted, hydrated } = formatAndHydrate(payload, { 0: 1, 1: 3000, 2: 1 });
++
++    const assistant = formatted.messages[1];
++    expect(assistant.getType()).toBe('ai');
++    expect((assistant.content as Array<{ type: string }>).map((b) => b.type)).toEqual([
++      'server_tool_use',
++      'web_search_tool_result',
++      'text',
++    ]);
++    expect(formatted.indexTokenCountMap?.[1]).toBeUndefined();
++    expect(hydrated[1]).toBe(tokenCounter(assistant));
++    expect(hydrated[1]).toBeGreaterThan(10_000);
++    expect(hydrated[0]).toBe(1);
++    expect(hydrated[2]).toBe(1);
++  });
++
++  it('does not count dropped thinking of a stored assistant turn', () => {
++    const payload = [
++      { role: 'user', content: 'q' },
++      thinkingOnlyAssistant,
++      { role: 'user', content: 'next' },
++    ] as unknown as TPayload;
++    const { formatted, hydrated } = formatAndHydrate(payload, { 0: 1, 1: 3000, 2: 1 });
++
++    expect(formatted.indexTokenCountMap?.[1]).toBeUndefined();
++    expect(hydrated[1]).toBe(tokenCounter(formatted.messages[1]));
++    expect(hydrated[1]).toBeLessThan(500);
++    expect(hydrated[0]).toBe(1);
++    expect(hydrated[2]).toBe(1);
++  });
++
++  it('keeps the char-ratio share for ToolMessages split from an assistant turn', () => {
++    const stored = 900;
++    const payload = [
++      { role: 'user', content: 'q' },
++      {
++        role: 'assistant',
++        tokenCount: stored,
++        content: [
++          { type: 'text', text: 'Let me look that up.', tool_call_ids: ['call_1'] },
++          {
++            type: 'tool_call',
++            tool_call: {
++              id: 'call_1',
++              name: 'lookup',
++              args: '{"query":"weather in Seoul"}',
++              type: 'tool_call',
++              output: 'Sunny, 21C. '.repeat(30),
++            },
++          },
++          { type: 'text', text: 'It is sunny in Seoul today.' },
++        ],
++      },
++      { role: 'user', content: 'next' },
++    ] as unknown as TPayload;
++    const formatted = formatAgentMessages(payload, { 0: 1, 1: stored, 2: 1 }, new Set(['lookup']));
++    const types = formatted.messages.map((m) => m.getType());
++    expect(types).toEqual(['human', 'ai', 'tool', 'ai', 'human']);
++
++    /** The formatter's length measure: text/content strings plus tool call name and args. */
++    const measure = (m: BaseMessage) => {
++      let n = 0;
++      if (typeof m.content === 'string') {
++        n += m.content.length;
++      } else {
++        for (const part of m.content as Array<{ text?: unknown; content?: unknown }>) {
++          const value = part?.text ?? part?.content;
++          if (typeof value === 'string') {
++            n += value.length;
++          }
++        }
++      }
++      for (const call of (m as AIMessage).tool_calls ?? []) {
++        n += call.name.length + JSON.stringify(call.args).length;
++      }
++      return n;
++    };
++    const lengths = [1, 2, 3].map((i) => measure(formatted.messages[i]));
++    const total = lengths.reduce((a, b) => a + b, 0);
++    const toolShare = Math.floor((lengths[1] / total) * stored);
++
++    expect(formatted.indexTokenCountMap?.[2]).toBe(toolShare);
++    expect(formatted.indexTokenCountMap?.[1]).toBeUndefined();
++    expect(formatted.indexTokenCountMap?.[3]).toBeUndefined();
++    expect(formatted.indexTokenCountMap?.[0]).toBe(1);
++    expect(formatted.indexTokenCountMap?.[4]).toBe(1);
++  });
++});
++
++describe('prune calibration with server tool usage', () => {
++  const history = () => [
++    new HumanMessage('question '.repeat(200)),
++    new AIMessage('answer '.repeat(300)),
++    new HumanMessage('next '.repeat(100)),
++  ];
++  const serverSearchMessage = () =>
++    new AIMessage({
++      content: [
++        { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'x' } },
++        {
++          type: 'web_search_tool_result',
++          tool_use_id: 'srvtoolu_1',
++          content: [
++            {
++              type: 'web_search_result',
++              url: 'https://example.com',
++              title: 't',
++              encrypted_content: 'Z'.repeat(4000),
++            },
++          ],
++        },
++        { type: 'text', text: 'Answer' },
++      ],
++    });
++
++  /** Prepares one call, then reports its usage with the model's reply appended. */
++  function runCall(reply: BaseMessage[], serverToolRequests?: number) {
++    const messages = history();
++    const indexTokenCountMap: Record<string, number> = {};
++    messages.forEach((m, i) => (indexTokenCountMap[i] = tokenCounter(m)));
++    const rawSent = Object.values(indexTokenCountMap).reduce((a, b) => a + b, 0);
++    const logs: Array<{ message: string; data?: Record<string, unknown> }> = [];
++    const prune = createPruneMessages({
++      startIndex: messages.length,
++      provider: Providers.ANTHROPIC,
++      tokenCounter,
++      maxTokens: 200_000,
++      indexTokenCountMap,
++      calibrationRatio: 1,
++      getInstructionTokens: () => 0,
++      log: (_level, message, data) => logs.push({ message, data }),
++    });
++    prune({ messages: [...messages] });
++
++    const params: PruneMessagesParams & { serverToolRequests?: number } = {
++      messages: [...messages, ...reply],
++      usageMetadata: { input_tokens: rawSent * 2, output_tokens: 50, total_tokens: rawSent * 2 + 50 },
++      ...(serverToolRequests === undefined ? {} : { serverToolRequests }),
++    };
++    const result = prune(params);
++    const calibration = logs.filter((l) => l.message.startsWith('Calibration'));
++    return { result, calibration };
++  }
++
++  it('skips a call whose usage reports server tool requests', () => {
++    const { result, calibration } = runCall([new AIMessage('reply')], 3);
++    expect(result.calibrationRatio).toBe(1);
++    expect(calibration).toEqual([
++      expect.objectContaining({
++        message: 'Calibration skipped',
++        data: expect.objectContaining({ reason: 'server_tool_usage' }),
++      }),
++    ]);
++  });
++
++  it('lets usage without server tool requests calibrate even over server tool blocks', () => {
++    const { result, calibration } = runCall([serverSearchMessage()], 0);
++    expect(result.calibrationRatio).toBe(2);
++    expect(calibration.map((l) => l.message)).toEqual(['Calibration observed']);
++  });
++
++  it('calibrates a plain call as before', () => {
++    const { result } = runCall([new AIMessage('reply')], 0);
++    expect(result.calibrationRatio).toBe(2);
++    const legacy = runCall([new AIMessage('reply')]);
++    expect(legacy.result.calibrationRatio).toBe(2);
++  });
++
++  it('falls back to the message shape when the usage carries no server tool information', () => {
++    const { result, calibration } = runCall([serverSearchMessage()]);
++    expect(result.calibrationRatio).toBe(1);
++    expect(calibration[0]?.data?.reason).toBe('server_tool_usage');
++  });
++
++  it('counts a new AI message with server tool results by content, once', () => {
++    const server = serverSearchMessage();
++    const followUp = new AIMessage('follow up text');
++    const { result } = runCall([server, followUp], 3);
++    expect(result.indexTokenCountMap[3]).toBe(tokenCounter(server));
++    expect(result.indexTokenCountMap[3]).not.toBe(50);
++    expect(result.indexTokenCountMap[4]).toBe(tokenCounter(followUp));
++  });
++
++  it('assigns output_tokens to a plain new AI message as before', () => {
++    const { result } = runCall([new AIMessage('reply')], 0);
++    expect(result.indexTokenCountMap[3]).toBe(50);
++  });
++});
++
++describe('Anthropic stream usage', () => {
++  const messageStartUsage = {
++    input_tokens: 4,
++    cache_creation_input_tokens: 251_457,
++    cache_read_input_tokens: 21_101,
++    output_tokens: 5,
++  };
++  const events = (startUsage: Record<string, unknown>) => [
++    {
++      type: 'message_start',
++      message: {
++        id: 'msg_1',
++        type: 'message',
++        role: 'assistant',
++        model: 'claude-test',
++        content: [],
++        stop_reason: null,
++        stop_sequence: null,
++        usage: startUsage,
++      },
++    },
++    {
++      type: 'content_block_start',
++      index: 0,
++      content_block: { type: 'server_tool_use', id: 'srvtoolu_01', name: 'web_search', input: {} },
++    },
++    {
++      type: 'content_block_delta',
++      index: 0,
++      delta: { type: 'input_json_delta', partial_json: '{"query":"x"}' },
++    },
++    { type: 'content_block_stop', index: 0 },
++    {
++      type: 'content_block_start',
++      index: 1,
++      content_block: {
++        type: 'web_search_tool_result',
++        tool_use_id: 'srvtoolu_01',
++        content: [
++          {
++            type: 'web_search_result',
++            url: 'https://example.com',
++            title: 't',
++            encrypted_content: 'abc',
++            page_age: null,
++          },
++        ],
++      },
++    },
++    { type: 'content_block_stop', index: 1 },
++    { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } },
++    { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'Answer text.' } },
++    { type: 'content_block_stop', index: 2 },
++    {
++      type: 'message_delta',
++      delta: { stop_reason: 'end_turn', stop_sequence: null },
++      usage: {
++        input_tokens: 8,
++        cache_creation_input_tokens: 278_089,
++        cache_read_input_tokens: 584_356,
++        output_tokens: 4363,
++        output_tokens_details: { thinking_tokens: 2428 },
++        server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 },
++      },
++    },
++    { type: 'message_stop' },
++  ];
++
++  /** Streams the events through the real model stream path (smoother included) and merges the chunks. */
++  async function streamFinalMessage(startUsage: Record<string, unknown>) {
++    const Anthropic = getChatModelClass(Providers.ANTHROPIC);
++    const model = new Anthropic({
++      model: 'claude-test',
++      apiKey: 'test',
++      streaming: true,
++      _lc_stream_delay: 0,
++    } as ConstructorParameters<typeof Anthropic>[0]);
++    const stub = model as unknown as { createStreamWithRetry: () => Promise<unknown> };
++    stub.createStreamWithRetry = async () => {
++      const source = events(startUsage);
++      const stream = (async function* () {
++        yield* source;
++      })();
++      return Object.assign(stream, { controller: { abort() {} } });
++    };
++    let final: AIMessageChunk | undefined;
++    const stream = await model.stream('hi', {
++      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
++    } as Parameters<typeof model.stream>[1]);
++    for await (const chunk of stream) {
++      final = final ? concat(final, chunk as AIMessageChunk) : (chunk as AIMessageChunk);
++    }
++    if (final == null) {
++      throw new Error('no chunks');
++    }
++    return final;
++  }
++
++  it('keeps server_tool_use from message_delta without touching message_start numbers', async () => {
++    const final = await streamFinalMessage(messageStartUsage);
++    expect(final.response_metadata.usage).toEqual({
++      cache_creation_input_tokens: 251_457,
++      cache_read_input_tokens: 21_101,
++      server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 },
++    });
++    /** The summed iterations stay in usage_metadata, which is why calibration must skip. */
++    expect(final.usage_metadata?.input_tokens).toBe(862_453);
++  });
++
++  it('gives the graph one request count for streamed and non-streamed usage shapes', async () => {
++    const { getServerToolRequests } = StandardGraph.prototype as unknown as {
++      getServerToolRequests: (message?: BaseMessage) => number | undefined;
++    };
++    const streamed = await streamFinalMessage(messageStartUsage);
++    expect(getServerToolRequests(streamed)).toBe(3);
++
++    /** Non-streaming: @langchain/anthropic keeps the whole provider usage in response_metadata. */
++    const nonStreamed = new AIMessage({
++      content: 'answer',
++      response_metadata: {
++        usage: {
++          input_tokens: 8,
++          output_tokens: 10,
++          server_tool_use: { web_search_requests: 2, web_fetch_requests: 1 },
++        },
++      },
++    });
++    expect(getServerToolRequests(nonStreamed)).toBe(3);
++
++    const noServerTools = new AIMessage({
++      content: 'answer',
++      response_metadata: { usage: { input_tokens: 8, output_tokens: 10 } },
++    });
++    expect(getServerToolRequests(noServerTools)).toBeUndefined();
++    expect(getServerToolRequests(new AIMessage('answer'))).toBeUndefined();
++  });
++
++  it('still reads 3 requests when message_start already carries zeroed server_tool_use', async () => {
++    const final = await streamFinalMessage({
++      ...messageStartUsage,
++      server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
++    });
++    expect(final.response_metadata.usage).toEqual({
++      cache_creation_input_tokens: 251_457,
++      cache_read_input_tokens: 21_101,
++      server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 },
++    });
++  });
++});

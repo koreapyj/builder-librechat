@@ -1,0 +1,34 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+index d262a4e..8ce9114
+--- a/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/messages/format.cjs
+@@ -1418,6 +1418,12 @@ const formatAgentMessages = (payload, indexTokenCountMap, tools, skills, options
+ 			updatedIndexTokenCountMap[resultIndices[lastIdx]] = tokenCount - distributed;
+ 		}
+ 	}
++	// builder-librechat: a stored assistant tokenCount is that turn's output_tokens (thinking included, server tool
++	// results excluded), not the size of what is re-sent. Leave its AI messages unset so the caller counts the emitted messages.
++	if (indexTokenCountMap) for (let originalIndex = 0; originalIndex < payload.length; originalIndex++) {
++		if (payload[originalIndex]?.role !== "assistant") continue;
++		for (const resultIndex of indexMapping[originalIndex] || []) if (messages[resultIndex]?.getType() === "ai") delete updatedIndexTokenCountMap[resultIndex];
++	}
+ 	const compactionSemanticIndexSnapshot = finalizeDerivedCompactionSemanticIndexSnapshot(compactionSemanticIndexCollector);
+ 	return {
+ 		messages,
+diff --git a/node_modules/@librechat/agents/dist/esm/messages/format.mjs b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+index 86b0223..cd1c334
+--- a/node_modules/@librechat/agents/dist/esm/messages/format.mjs
++++ b/node_modules/@librechat/agents/dist/esm/messages/format.mjs
+@@ -1418,6 +1418,12 @@ const formatAgentMessages = (payload, indexTokenCountMap, tools, skills, options
+ 			updatedIndexTokenCountMap[resultIndices[lastIdx]] = tokenCount - distributed;
+ 		}
+ 	}
++	// builder-librechat: a stored assistant tokenCount is that turn's output_tokens (thinking included, server tool
++	// results excluded), not the size of what is re-sent. Leave its AI messages unset so the caller counts the emitted messages.
++	if (indexTokenCountMap) for (let originalIndex = 0; originalIndex < payload.length; originalIndex++) {
++		if (payload[originalIndex]?.role !== "assistant") continue;
++		for (const resultIndex of indexMapping[originalIndex] || []) if (messages[resultIndex]?.getType() === "ai") delete updatedIndexTokenCountMap[resultIndex];
++	}
+ 	const compactionSemanticIndexSnapshot = finalizeDerivedCompactionSemanticIndexSnapshot(compactionSemanticIndexCollector);
+ 	return {
+ 		messages,

@@ -1,0 +1,220 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/agents/AgentContext.cjs b/node_modules/@librechat/agents/dist/cjs/agents/AgentContext.cjs
+index 79ea524..2578977
+--- a/node_modules/@librechat/agents/dist/cjs/agents/AgentContext.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/agents/AgentContext.cjs
+@@ -478,6 +478,7 @@ The following tools are available exclusively through ${programmaticRunnerNames}
+ 		this.lastToken = void 0;
+ 		this.indexTokenCountMap = { ...this.baseIndexTokenCountMap };
+ 		this.currentUsage = void 0;
++		this.currentServerToolRequests = void 0;
+ 		this.pruneMessages = void 0;
+ 		this.clearProviderProjection(false);
+ 		this.lastStreamCall = void 0;
+@@ -621,6 +622,7 @@ The following tools are available exclusively through ${programmaticRunnerNames}
+ 		this.baseIndexTokenCountMap = { ...newTokenMap };
+ 		this._lastSummarizationMsgCount = Object.keys(newTokenMap).length;
+ 		this.currentUsage = void 0;
++		this.currentServerToolRequests = void 0;
+ 		this.lastCallUsage = void 0;
+ 		this.totalTokensFresh = false;
+ 	}
+diff --git a/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs b/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs
+index e0284a1..0a8130d
+--- a/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/graphs/Graph.cjs
+@@ -1265,6 +1265,14 @@ var StandardGraph = class StandardGraph extends Graph {
+ 	setSubagentModelOverride(model) {
+ 		this.subagentModelOverride = model;
+ 	}
++	// builder-librechat: sum of usage.server_tool_use.*_requests the provider reported for this call; undefined when absent
++	getServerToolRequests(finalMessage) {
++		const serverToolUse = finalMessage?.response_metadata?.usage?.server_tool_use;
++		if (serverToolUse == null || typeof serverToolUse !== "object") return;
++		let requests;
++		for (const [key, value] of Object.entries(serverToolUse)) if (key.endsWith("_requests") && typeof value === "number" && Number.isFinite(value)) requests = (requests ?? 0) + value;
++		return requests;
++	}
+ 	getUsageMetadata(finalMessage) {
+ 		if (finalMessage && "usage_metadata" in finalMessage && finalMessage.usage_metadata != null) return finalMessage.usage_metadata;
+ 	}
+@@ -1392,6 +1400,7 @@ var StandardGraph = class StandardGraph extends Graph {
+ 					canonicalPrefixStable: true,
+ 					usageMetadata: agentContext.currentUsage,
+ 					lastCallUsage: agentContext.lastCallUsage,
++					serverToolRequests: agentContext.currentServerToolRequests,
+ 					totalTokensFresh: agentContext.totalTokensFresh
+ 				});
+ 				prunedOriginalToolContent = newOriginalToolContent;
+@@ -2071,6 +2080,7 @@ var StandardGraph = class StandardGraph extends Graph {
+ 			}
+ 			const invokeElapsed = ((Date.now() - invokeStart) / 1e3).toFixed(2);
+ 			agentContext.currentUsage = this.getUsageMetadata(result.messages?.[0]);
++			agentContext.currentServerToolRequests = this.getServerToolRequests(result.messages?.[0]);
+ 			const estimatedUsage = (result.messages?.[0])?.response_metadata.estimated_usage === true;
+ 			if (agentContext.currentUsage) {
+ 				if (!estimatedUsage) agentContext.updateLastCallUsage(agentContext.currentUsage);
+diff --git a/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs b/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs
+index 1ff537d..424f50e
+--- a/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs
+@@ -39,6 +39,8 @@ function _makeMessageChunkFromAnthropicEvent(data, fields) {
+ 	} else if (data.type === "message_delta") {
+ 		const messageDeltaResponseMetadata = { ...responseMetadata };
+ 		if ("context_management" in data.delta) Object.assign(messageDeltaResponseMetadata, { context_management: data.delta.context_management });
++		// builder-librechat: keep the provider's server tool request counts (only those; other usage numbers would be summed when chunks merge)
++		if (data.usage?.server_tool_use != null && typeof data.usage.server_tool_use === "object") messageDeltaResponseMetadata.usage = { server_tool_use: { ...data.usage.server_tool_use } };
+ 		const deltaUsage = data.usage;
+ 		const usageMetadata = (deltaUsage.input_tokens != null || deltaUsage.cache_creation_input_tokens != null || deltaUsage.cache_read_input_tokens != null ? getAnthropicUsageMetadata(deltaUsage) : void 0) ?? {
+ 			input_tokens: 0,
+diff --git a/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs b/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs
+index 7629095..ecd5ed2
+--- a/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/messages/prune.cjs
+@@ -1094,6 +1094,10 @@ function preFlightTruncateToolCallInputs(params) {
+ 		tokenCounter: params.tokenCounter
+ 	});
+ }
++// builder-librechat: provider server tool blocks (server_tool_use / *_tool_result) in an AI message
++function hasServerToolResultBlocks(message) {
++	return Array.isArray(message?.content) && message.content.some((block) => typeof block?.type === "string" && (block.type === "server_tool_use" || block.type.endsWith("_tool_result")));
++}
+ function createPruneMessages(factoryParams) {
+ 	const providerFamily = factoryParams.provider == null ? void 0 : require_providerRegistry.getProviderFamily(factoryParams.provider);
+ 	const usesBedrockThinking = factoryParams.provider === "bedrock" || providerFamily === "bedrock";
+@@ -1253,7 +1257,8 @@ function createPruneMessages(factoryParams) {
+ 			const message = params.messages[i];
+ 			if (indexTokenCountMap[i] !== void 0) continue;
+ 			if (!outputTokensAssigned && currentUsage && message.getType() === "ai") {
+-				indexTokenCountMap[i] = currentUsage.output_tokens;
++				// builder-librechat: server tool results in the message were input, not output; count what is re-sent
++				indexTokenCountMap[i] = hasServerToolResultBlocks(message) ? factoryParams.tokenCounter(message) : currentUsage.output_tokens;
+ 				newOutputs.add(i);
+ 				outputTokensAssigned = true;
+ 			} else {
+@@ -1276,12 +1281,14 @@ function createPruneMessages(factoryParams) {
+ 			const providerMessageTokens = Math.max(0, providerInputTokens - instructionOverhead);
+ 			const minimumComparableInputTokens = instructionOverhead + rawSentThisTurn * CALIBRATION_RATIO_MIN;
+ 			// builder-librechat: server-tool turns report cumulative input over internal iterations; skip calibration.
++			// The provider's usage (server_tool_use.*_requests) decides when present; otherwise fall back to the message shape.
+ 			let hasServerToolUsage = false;
+-			for (let i = lastTurnStartIndex; i < params.messages.length && !hasServerToolUsage; i++) {
++			if (typeof params.serverToolRequests === "number" && Number.isFinite(params.serverToolRequests)) hasServerToolUsage = params.serverToolRequests > 0;
++			else for (let i = lastTurnStartIndex; i < params.messages.length && !hasServerToolUsage; i++) {
+ 				const turnMessage = params.messages[i];
+ 				if (turnMessage.getType() !== "ai") continue;
+ 				if (turnMessage.tool_calls?.some((toolCall) => typeof toolCall.id === "string" && toolCall.id.startsWith("srvtoolu_"))) hasServerToolUsage = true;
+-				else if (Array.isArray(turnMessage.content)) hasServerToolUsage = turnMessage.content.some((block) => typeof block?.type === "string" && (block.type === "server_tool_use" || block.type.endsWith("_tool_result")));
++				else hasServerToolUsage = hasServerToolResultBlocks(turnMessage);
+ 			}
+ 			let calibrationSkipReason;
+ 			if (rawSentThisTurn <= 0) calibrationSkipReason = "no_sent_messages";
+diff --git a/node_modules/@librechat/agents/dist/esm/agents/AgentContext.mjs b/node_modules/@librechat/agents/dist/esm/agents/AgentContext.mjs
+index 1475728..73b9945
+--- a/node_modules/@librechat/agents/dist/esm/agents/AgentContext.mjs
++++ b/node_modules/@librechat/agents/dist/esm/agents/AgentContext.mjs
+@@ -478,6 +478,7 @@ The following tools are available exclusively through ${programmaticRunnerNames}
+ 		this.lastToken = void 0;
+ 		this.indexTokenCountMap = { ...this.baseIndexTokenCountMap };
+ 		this.currentUsage = void 0;
++		this.currentServerToolRequests = void 0;
+ 		this.pruneMessages = void 0;
+ 		this.clearProviderProjection(false);
+ 		this.lastStreamCall = void 0;
+@@ -621,6 +622,7 @@ The following tools are available exclusively through ${programmaticRunnerNames}
+ 		this.baseIndexTokenCountMap = { ...newTokenMap };
+ 		this._lastSummarizationMsgCount = Object.keys(newTokenMap).length;
+ 		this.currentUsage = void 0;
++		this.currentServerToolRequests = void 0;
+ 		this.lastCallUsage = void 0;
+ 		this.totalTokensFresh = false;
+ 	}
+diff --git a/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs b/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs
+index c95f8ea..cd9b26c
+--- a/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs
++++ b/node_modules/@librechat/agents/dist/esm/graphs/Graph.mjs
+@@ -1265,6 +1265,14 @@ var StandardGraph = class StandardGraph extends Graph {
+ 	setSubagentModelOverride(model) {
+ 		this.subagentModelOverride = model;
+ 	}
++	// builder-librechat: sum of usage.server_tool_use.*_requests the provider reported for this call; undefined when absent
++	getServerToolRequests(finalMessage) {
++		const serverToolUse = finalMessage?.response_metadata?.usage?.server_tool_use;
++		if (serverToolUse == null || typeof serverToolUse !== "object") return;
++		let requests;
++		for (const [key, value] of Object.entries(serverToolUse)) if (key.endsWith("_requests") && typeof value === "number" && Number.isFinite(value)) requests = (requests ?? 0) + value;
++		return requests;
++	}
+ 	getUsageMetadata(finalMessage) {
+ 		if (finalMessage && "usage_metadata" in finalMessage && finalMessage.usage_metadata != null) return finalMessage.usage_metadata;
+ 	}
+@@ -1392,6 +1400,7 @@ var StandardGraph = class StandardGraph extends Graph {
+ 					canonicalPrefixStable: true,
+ 					usageMetadata: agentContext.currentUsage,
+ 					lastCallUsage: agentContext.lastCallUsage,
++					serverToolRequests: agentContext.currentServerToolRequests,
+ 					totalTokensFresh: agentContext.totalTokensFresh
+ 				});
+ 				prunedOriginalToolContent = newOriginalToolContent;
+@@ -2071,6 +2080,7 @@ var StandardGraph = class StandardGraph extends Graph {
+ 			}
+ 			const invokeElapsed = ((Date.now() - invokeStart) / 1e3).toFixed(2);
+ 			agentContext.currentUsage = this.getUsageMetadata(result.messages?.[0]);
++			agentContext.currentServerToolRequests = this.getServerToolRequests(result.messages?.[0]);
+ 			const estimatedUsage = (result.messages?.[0])?.response_metadata.estimated_usage === true;
+ 			if (agentContext.currentUsage) {
+ 				if (!estimatedUsage) agentContext.updateLastCallUsage(agentContext.currentUsage);
+diff --git a/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs b/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs
+index 0aa6129..b896e06
+--- a/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs
++++ b/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs
+@@ -39,6 +39,8 @@ function _makeMessageChunkFromAnthropicEvent(data, fields) {
+ 	} else if (data.type === "message_delta") {
+ 		const messageDeltaResponseMetadata = { ...responseMetadata };
+ 		if ("context_management" in data.delta) Object.assign(messageDeltaResponseMetadata, { context_management: data.delta.context_management });
++		// builder-librechat: keep the provider's server tool request counts (only those; other usage numbers would be summed when chunks merge)
++		if (data.usage?.server_tool_use != null && typeof data.usage.server_tool_use === "object") messageDeltaResponseMetadata.usage = { server_tool_use: { ...data.usage.server_tool_use } };
+ 		const deltaUsage = data.usage;
+ 		const usageMetadata = (deltaUsage.input_tokens != null || deltaUsage.cache_creation_input_tokens != null || deltaUsage.cache_read_input_tokens != null ? getAnthropicUsageMetadata(deltaUsage) : void 0) ?? {
+ 			input_tokens: 0,
+diff --git a/node_modules/@librechat/agents/dist/esm/messages/prune.mjs b/node_modules/@librechat/agents/dist/esm/messages/prune.mjs
+index 2d8c743..20638b2
+--- a/node_modules/@librechat/agents/dist/esm/messages/prune.mjs
++++ b/node_modules/@librechat/agents/dist/esm/messages/prune.mjs
+@@ -1094,6 +1094,10 @@ function preFlightTruncateToolCallInputs(params) {
+ 		tokenCounter: params.tokenCounter
+ 	});
+ }
++// builder-librechat: provider server tool blocks (server_tool_use / *_tool_result) in an AI message
++function hasServerToolResultBlocks(message) {
++	return Array.isArray(message?.content) && message.content.some((block) => typeof block?.type === "string" && (block.type === "server_tool_use" || block.type.endsWith("_tool_result")));
++}
+ function createPruneMessages(factoryParams) {
+ 	const providerFamily = factoryParams.provider == null ? void 0 : getProviderFamily(factoryParams.provider);
+ 	const usesBedrockThinking = factoryParams.provider === "bedrock" || providerFamily === "bedrock";
+@@ -1253,7 +1257,8 @@ function createPruneMessages(factoryParams) {
+ 			const message = params.messages[i];
+ 			if (indexTokenCountMap[i] !== void 0) continue;
+ 			if (!outputTokensAssigned && currentUsage && message.getType() === "ai") {
+-				indexTokenCountMap[i] = currentUsage.output_tokens;
++				// builder-librechat: server tool results in the message were input, not output; count what is re-sent
++				indexTokenCountMap[i] = hasServerToolResultBlocks(message) ? factoryParams.tokenCounter(message) : currentUsage.output_tokens;
+ 				newOutputs.add(i);
+ 				outputTokensAssigned = true;
+ 			} else {
+@@ -1276,12 +1281,14 @@ function createPruneMessages(factoryParams) {
+ 			const providerMessageTokens = Math.max(0, providerInputTokens - instructionOverhead);
+ 			const minimumComparableInputTokens = instructionOverhead + rawSentThisTurn * CALIBRATION_RATIO_MIN;
+ 			// builder-librechat: server-tool turns report cumulative input over internal iterations; skip calibration.
++			// The provider's usage (server_tool_use.*_requests) decides when present; otherwise fall back to the message shape.
+ 			let hasServerToolUsage = false;
+-			for (let i = lastTurnStartIndex; i < params.messages.length && !hasServerToolUsage; i++) {
++			if (typeof params.serverToolRequests === "number" && Number.isFinite(params.serverToolRequests)) hasServerToolUsage = params.serverToolRequests > 0;
++			else for (let i = lastTurnStartIndex; i < params.messages.length && !hasServerToolUsage; i++) {
+ 				const turnMessage = params.messages[i];
+ 				if (turnMessage.getType() !== "ai") continue;
+ 				if (turnMessage.tool_calls?.some((toolCall) => typeof toolCall.id === "string" && toolCall.id.startsWith("srvtoolu_"))) hasServerToolUsage = true;
+-				else if (Array.isArray(turnMessage.content)) hasServerToolUsage = turnMessage.content.some((block) => typeof block?.type === "string" && (block.type === "server_tool_use" || block.type.endsWith("_tool_result")));
++				else hasServerToolUsage = hasServerToolResultBlocks(turnMessage);
+ 			}
+ 			let calibrationSkipReason;
+ 			if (rawSentThisTurn <= 0) calibrationSkipReason = "no_sent_messages";
