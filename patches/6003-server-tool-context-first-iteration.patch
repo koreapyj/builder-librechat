@@ -1,0 +1,161 @@
+--- a/api/server/controllers/agents/callbacks.js
++++ b/api/server/controllers/agents/callbacks.js
+@@ -10,6 +10,7 @@ const {
+   UsageEvents,
+   getRunStepDurationMs,
+   getRunStepCloseMetadata,
++  getServerToolContextUsage,
+ } = require('librechat-data-provider');
+ const {
+   GraphEvents,
+@@ -207,6 +208,9 @@ class ModelEndHandler {
+             /** Per-run sequence so identical payloads from distinct calls
+              *  stay distinguishable during resume dedupe */
+             seq: this.collectedUsage.length,
++            /** builder-librechat: server-tool calls carry their first iteration's
++             *  prompt for the context gauge only (absent otherwise) */
++            ...getServerToolContextUsage(data?.output),
+           });
+         } catch (err) {
+           /** Best-effort telemetry: a failed emit (closed SSE, Redis publish
+--- a/packages/api/src/agents/calibration.spec.ts
++++ b/packages/api/src/agents/calibration.spec.ts
+@@ -391,6 +391,8 @@ describe('Anthropic stream usage', () =>
+   it('keeps server_tool_use from message_delta without touching message_start numbers', async () => {
+     const final = await streamFinalMessage(messageStartUsage);
+     expect(final.response_metadata.usage).toEqual({
++      /** pkg-patch 009: the first iteration's input_tokens (message_start) is kept as is */
++      input_tokens: 4,
+       cache_creation_input_tokens: 251_457,
+       cache_read_input_tokens: 21_101,
+       server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 },
+@@ -433,6 +435,8 @@ describe('Anthropic stream usage', () =>
+       server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+     });
+     expect(final.response_metadata.usage).toEqual({
++      /** pkg-patch 009: the first iteration's input_tokens (message_start) is kept as is */
++      input_tokens: 4,
+       cache_creation_input_tokens: 251_457,
+       cache_read_input_tokens: 21_101,
+       server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 },
+--- a/packages/data-provider/src/types/runs.ts
++++ b/packages/data-provider/src/types/runs.ts
+@@ -356,6 +356,19 @@ export type TTokenUsageEvent = {
+    *  rates); present only when `interface.contextCost` is enabled. Clients sum
+    *  this rather than re-deriving cost from base rates. */
+   cost?: number;
++  /** builder-librechat: provider-reported server tool requests
++   *  (`server_tool_use.*_requests`) of this call; set only when > 0. Such a
++   *  call's usage sums input over its internal iterations, so it is not the
++   *  context size. Context display only — billing keeps the fields above. */
++  server_tool_requests?: number;
++  /** builder-librechat: the prompt actually sent, from the call's first
++   *  internal iteration (Anthropic streaming `message_start` usage), with its
++   *  cache split. Set only alongside `server_tool_requests`, when available. */
++  first_iteration_input?: {
++    prompt_tokens: number;
++    cache_creation?: number;
++    cache_read?: number;
++  };
+ };
+ 
+ const finiteNonNegativeInteger = (value: unknown): number | undefined => {
+@@ -525,18 +538,90 @@ export const outputTokensFromUsage = (ev
+   return Math.max(output, total - promptTokensFromUsage(event));
+ };
+ 
++/**
++ * builder-librechat: context-size details of a model call that ran provider
++ * server tools, read from its final message's `response_metadata.usage`.
++ * Returns `{}` (nothing to add to the usage event) when no server tool request
++ * was reported. Context display only; billing keeps the provider's summed usage.
++ *
++ * A streamed Anthropic call keeps the first iteration's `message_start` usage
++ * there (without `output_tokens`); a non-streamed call keeps the provider's
++ * final usage, whose `output_tokens` marks the input as the iteration sum, so
++ * no first-iteration input is reported for it.
++ */
++export const getServerToolContextUsage = (
++  output: unknown,
++): Pick<TTokenUsageEvent, 'server_tool_requests' | 'first_iteration_input'> => {
++  const usage = (output as { response_metadata?: { usage?: unknown } } | null | undefined)
++    ?.response_metadata?.usage;
++  if (usage == null || typeof usage !== 'object') {
++    return {};
++  }
++  const raw = usage as Record<string, unknown>;
++  const serverToolUse = raw.server_tool_use;
++  if (serverToolUse == null || typeof serverToolUse !== 'object') {
++    return {};
++  }
++  let requests = 0;
++  for (const [key, value] of Object.entries(serverToolUse)) {
++    if (key.endsWith('_requests') && typeof value === 'number' && Number.isFinite(value)) {
++      requests += value;
++    }
++  }
++  if (!(requests > 0)) {
++    return {};
++  }
++  const result: Pick<TTokenUsageEvent, 'server_tool_requests' | 'first_iteration_input'> = {
++    server_tool_requests: requests,
++  };
++  const inputTokens = finiteNonNegativeInteger(raw.input_tokens);
++  if (inputTokens != null && raw.output_tokens == null) {
++    const cacheCreation = finiteNonNegativeInteger(raw.cache_creation_input_tokens) ?? 0;
++    const cacheRead = finiteNonNegativeInteger(raw.cache_read_input_tokens) ?? 0;
++    result.first_iteration_input = {
++      prompt_tokens: Math.min(Number.MAX_SAFE_INTEGER, inputTokens + cacheCreation + cacheRead),
++      cache_creation: cacheCreation,
++      cache_read: cacheRead,
++    };
++  }
++  return result;
++};
++
+ /** Reconcile and retain the primary call details on live, saved, and resumable snapshots. */
+ export const reconcileContextUsageFromEvent = (
+   snapshot: TContextUsageEvent,
+   event: TTokenUsageEvent,
+-): TContextUsageEvent => ({
+-  ...reconcileContextUsage(snapshot, promptTokensFromUsage(event)),
+-  model: event.model,
+-  provider: event.provider,
+-  completedOutputTokens: outputTokensFromUsage(event),
+-  cacheRead: finiteNonNegativeInteger(event.input_token_details?.cache_read) ?? 0,
+-  cacheWrite: finiteNonNegativeInteger(event.input_token_details?.cache_creation) ?? 0,
+-});
++): TContextUsageEvent => {
++  /** builder-librechat: a server-tool call's usage sums input over its internal
++   *  iterations. Reconcile to the first iteration's prompt when reported;
++   *  otherwise (e.g. non-streaming) keep the snapshot's estimate. */
++  if ((finiteNonNegativeInteger(event.server_tool_requests) ?? 0) > 0) {
++    const first = event.first_iteration_input;
++    const firstPromptTokens = finiteNonNegativeInteger(first?.prompt_tokens) ?? 0;
++    const callDetails = {
++      model: event.model,
++      provider: event.provider,
++      completedOutputTokens: outputTokensFromUsage(event),
++    };
++    if (firstPromptTokens <= 0) {
++      return { ...snapshot, ...callDetails };
++    }
++    return {
++      ...reconcileContextUsage(snapshot, firstPromptTokens),
++      ...callDetails,
++      cacheRead: finiteNonNegativeInteger(first?.cache_read) ?? 0,
++      cacheWrite: finiteNonNegativeInteger(first?.cache_creation) ?? 0,
++    };
++  }
++  return {
++    ...reconcileContextUsage(snapshot, promptTokensFromUsage(event)),
++    model: event.model,
++    provider: event.provider,
++    completedOutputTokens: outputTokensFromUsage(event),
++    cacheRead: finiteNonNegativeInteger(event.input_token_details?.cache_read) ?? 0,
++    cacheWrite: finiteNonNegativeInteger(event.input_token_details?.cache_creation) ?? 0,
++  };
++};
+ 
+ /** Lifecycle phase carried on subagent-progress envelopes (mirrors SDK SubagentUpdatePhase). */
+ export type SubagentUpdatePhase =

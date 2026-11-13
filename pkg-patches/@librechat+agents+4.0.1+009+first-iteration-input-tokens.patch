@@ -1,0 +1,28 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs b/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs
+index 424f50e..e1e8b1c
+--- a/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/llm/anthropic/utils/message_outputs.cjs
+@@ -24,7 +24,8 @@ function _makeMessageChunkFromAnthropicEvent(data, fields) {
+ 	const responseMetadata = { model_provider: "anthropic" };
+ 	if (data.type === "message_start") {
+ 		const { content, usage, ...additionalKwargs } = data.message;
+-		const { input_tokens: _inputTokens, output_tokens: _outputTokens, ...rest } = usage;
++		// builder-librechat: keep the first iteration's input_tokens (the prompt actually sent); message_delta never sets it, so chunk merges leave it as is
++		const { output_tokens: _outputTokens, ...rest } = usage;
+ 		const usageMetadata = getAnthropicUsageMetadata(usage);
+ 		return { chunk: new _langchain_core_messages.AIMessageChunk({
+ 			content: fields.coerceContentToString ? "" : [],
+diff --git a/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs b/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs
+index b896e06..d9c87b7
+--- a/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs
++++ b/node_modules/@librechat/agents/dist/esm/llm/anthropic/utils/message_outputs.mjs
+@@ -24,7 +24,8 @@ function _makeMessageChunkFromAnthropicEvent(data, fields) {
+ 	const responseMetadata = { model_provider: "anthropic" };
+ 	if (data.type === "message_start") {
+ 		const { content, usage, ...additionalKwargs } = data.message;
+-		const { input_tokens: _inputTokens, output_tokens: _outputTokens, ...rest } = usage;
++		// builder-librechat: keep the first iteration's input_tokens (the prompt actually sent); message_delta never sets it, so chunk merges leave it as is
++		const { output_tokens: _outputTokens, ...rest } = usage;
+ 		const usageMetadata = getAnthropicUsageMetadata(usage);
+ 		return { chunk: new AIMessageChunk({
+ 			content: fields.coerceContentToString ? "" : [],
