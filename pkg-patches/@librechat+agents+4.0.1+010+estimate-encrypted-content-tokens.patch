@@ -1,0 +1,208 @@
+diff --git a/node_modules/@librechat/agents/dist/cjs/utils/tokens.cjs b/node_modules/@librechat/agents/dist/cjs/utils/tokens.cjs
+index 1ea94b2..317a752
+--- a/node_modules/@librechat/agents/dist/cjs/utils/tokens.cjs
++++ b/node_modules/@librechat/agents/dist/cjs/utils/tokens.cjs
+@@ -55,6 +55,42 @@ const MAX_STRUCTURED_SAFETY_INSPECTION_WORK = 1e4;
+ const MAX_RAW_TOOL_CALLS = MAX_STRUCTURED_SAFETY_INSPECTION_WORK;
+ const MAX_TEXT_TOKENIZATION_CHARS = 8192;
+ const TEXT_TOKEN_CHUNK_BOUNDARY_SAFETY_TOKENS = 4;
++// builder-librechat: server web search results carry `encrypted_content`, an opaque base64-like string. Tokenizing it
++// overcounts ~1.8-2x and floods the tokenizer's process-wide merge cache (LRU), slowing every later count. Measured
++// provider input per 1k encrypted chars over six one-search (9 results) turns: 411-455; `length * 0.43` stays within
++// -5.5%..+4.5% (CV 4%), while a fixed per-result value varies 22%. The share is fixed on the final counter result,
++// i.e. after the Claude correction its callers apply.
++const ENCRYPTED_CONTENT_TOKENS_PER_CHAR = .43;
++const ENCRYPTED_CONTENT_JSON_PATTERN = /(,\s*)?"encrypted_content"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"(\s*,)?/g;
++/** Removes `"encrypted_content": "..."` members from JSON text (stored tool output), returning their value length. */
++function stripEncryptedContentFromJsonText(text) {
++	if (!text.includes("\"encrypted_content\"")) return {
++		text,
++		encryptedChars: 0
++	};
++	let encryptedChars = 0;
++	const stripped = text.replace(ENCRYPTED_CONTENT_JSON_PATTERN, (_match, leading, value, trailing) => {
++		encryptedChars += value.length;
++		return leading != null && trailing != null ? "," : "";
++	});
++	return {
++		text: stripped,
++		encryptedChars
++	};
++}
++/** A web search result object without its string `encrypted_content`, or undefined when it has none. */
++function withoutEncryptedContent(result) {
++	if (result == null || typeof result !== "object" || Array.isArray(result) || typeof result.encrypted_content !== "string") return;
++	const { encrypted_content, ...rest } = result;
++	return {
++		rest,
++		encryptedChars: encrypted_content.length
++	};
++}
++function encryptedContentTokens(encryptedChars, encoding) {
++	if (encryptedChars <= 0) return 0;
++	return Math.ceil(encryptedChars * ENCRYPTED_CONTENT_TOKENS_PER_CHAR / (encoding === "claude" ? CLAUDE_TOKEN_CORRECTION : 1));
++}
+ function extractImageDimensions(base64Data) {
+ 	const raw = base64Data.startsWith("data:") ? base64Data.slice(base64Data.indexOf(",") + 1) : base64Data;
+ 	if (raw.length < 32) return null;
+@@ -508,9 +544,40 @@ function getTokenCountForMessage(message, getTokenCount, encoding = "o200k_base"
+ 				const args = item.tool_call.args;
+ 				if (args != null) numTokens += typeof args === "string" ? countText(args) : getBoundedStructuredTokenCount(args, countText);
+ 				const output = item.tool_call.output;
+-				if (output != null) processValue(output, `${path}[${index}].tool_call.output`);
++				// builder-librechat: stored server tool output (JSON text) is counted without its encrypted_content
++				if (typeof output === "string") {
++					const stripped = stripEncryptedContentFromJsonText(output);
++					encryptedChars += stripped.encryptedChars;
++					numTokens += countText(stripped.text);
++				} else if (output != null) processValue(output, `${path}[${index}].tool_call.output`);
+ 				continue;
+ 			}
++			// builder-librechat: count web search results without their encrypted_content (estimated from length below)
++			if (item.type === "web_search_tool_result" && Array.isArray(item.content) && !hasUnsafeStructuredSerialization(item)) {
++				let blockEncryptedChars = 0;
++				const content = item.content.map((result) => {
++					const stripped = withoutEncryptedContent(result);
++					if (stripped == null) return result;
++					blockEncryptedChars += stripped.encryptedChars;
++					return stripped.rest;
++				});
++				if (blockEncryptedChars > 0) {
++					encryptedChars += blockEncryptedChars;
++					numTokens += getBoundedStructuredTokenCount({
++						...item,
++						content
++					}, countText);
++					continue;
++				}
++			}
++			if (item.type === "web_search_result" && !hasUnsafeStructuredSerialization(item)) {
++				const stripped = withoutEncryptedContent(item);
++				if (stripped != null) {
++					encryptedChars += stripped.encryptedChars;
++					numTokens += getBoundedStructuredTokenCount(stripped.rest, countText);
++					continue;
++				}
++			}
+ 			const nestedValue = item[item.type];
+ 			if (nestedValue == null) {
+ 				numTokens += getBoundedStructuredTokenCount(item, countText);
+@@ -543,12 +610,14 @@ function getTokenCountForMessage(message, getTokenCount, encoding = "o200k_base"
+ 		path: "additional_kwargs.type"
+ 	});
+ 	let numTokens = tokensPerMessage;
++	let encryptedChars = 0;
+ 	const messageType = message.getType();
+ 	if (messageType === "tool" && additionalType?.value === "computer_call_output" && require_toolContent.isComputerCallOutputContent(message.content) && typeof message.content === "string") numTokens += Math.ceil(estimateImageBlockTokens({
+ 		type: "computer_screenshot",
+ 		image_url: message.content
+ 	}, encoding) * IMAGE_TOKEN_SAFETY_MARGIN);
+ 	else processValue(message.content, "content");
++	numTokens += encryptedContentTokens(encryptedChars, encoding);
+ 	ensureSafeTokenMeasurement(numTokens, "content");
+ 	const messageRole = message.role;
+ 	if (messageType === "ai" || messageRole === "assistant") {
+diff --git a/node_modules/@librechat/agents/dist/esm/utils/tokens.mjs b/node_modules/@librechat/agents/dist/esm/utils/tokens.mjs
+index 0def419..42a5013
+--- a/node_modules/@librechat/agents/dist/esm/utils/tokens.mjs
++++ b/node_modules/@librechat/agents/dist/esm/utils/tokens.mjs
+@@ -55,6 +55,42 @@ const MAX_STRUCTURED_SAFETY_INSPECTION_WORK = 1e4;
+ const MAX_RAW_TOOL_CALLS = MAX_STRUCTURED_SAFETY_INSPECTION_WORK;
+ const MAX_TEXT_TOKENIZATION_CHARS = 8192;
+ const TEXT_TOKEN_CHUNK_BOUNDARY_SAFETY_TOKENS = 4;
++// builder-librechat: server web search results carry `encrypted_content`, an opaque base64-like string. Tokenizing it
++// overcounts ~1.8-2x and floods the tokenizer's process-wide merge cache (LRU), slowing every later count. Measured
++// provider input per 1k encrypted chars over six one-search (9 results) turns: 411-455; `length * 0.43` stays within
++// -5.5%..+4.5% (CV 4%), while a fixed per-result value varies 22%. The share is fixed on the final counter result,
++// i.e. after the Claude correction its callers apply.
++const ENCRYPTED_CONTENT_TOKENS_PER_CHAR = .43;
++const ENCRYPTED_CONTENT_JSON_PATTERN = /(,\s*)?"encrypted_content"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"(\s*,)?/g;
++/** Removes `"encrypted_content": "..."` members from JSON text (stored tool output), returning their value length. */
++function stripEncryptedContentFromJsonText(text) {
++	if (!text.includes("\"encrypted_content\"")) return {
++		text,
++		encryptedChars: 0
++	};
++	let encryptedChars = 0;
++	const stripped = text.replace(ENCRYPTED_CONTENT_JSON_PATTERN, (_match, leading, value, trailing) => {
++		encryptedChars += value.length;
++		return leading != null && trailing != null ? "," : "";
++	});
++	return {
++		text: stripped,
++		encryptedChars
++	};
++}
++/** A web search result object without its string `encrypted_content`, or undefined when it has none. */
++function withoutEncryptedContent(result) {
++	if (result == null || typeof result !== "object" || Array.isArray(result) || typeof result.encrypted_content !== "string") return;
++	const { encrypted_content, ...rest } = result;
++	return {
++		rest,
++		encryptedChars: encrypted_content.length
++	};
++}
++function encryptedContentTokens(encryptedChars, encoding) {
++	if (encryptedChars <= 0) return 0;
++	return Math.ceil(encryptedChars * ENCRYPTED_CONTENT_TOKENS_PER_CHAR / (encoding === "claude" ? CLAUDE_TOKEN_CORRECTION : 1));
++}
+ function extractImageDimensions(base64Data) {
+ 	const raw = base64Data.startsWith("data:") ? base64Data.slice(base64Data.indexOf(",") + 1) : base64Data;
+ 	if (raw.length < 32) return null;
+@@ -508,9 +544,40 @@ function getTokenCountForMessage(message, getTokenCount, encoding = "o200k_base"
+ 				const args = item.tool_call.args;
+ 				if (args != null) numTokens += typeof args === "string" ? countText(args) : getBoundedStructuredTokenCount(args, countText);
+ 				const output = item.tool_call.output;
+-				if (output != null) processValue(output, `${path}[${index}].tool_call.output`);
++				// builder-librechat: stored server tool output (JSON text) is counted without its encrypted_content
++				if (typeof output === "string") {
++					const stripped = stripEncryptedContentFromJsonText(output);
++					encryptedChars += stripped.encryptedChars;
++					numTokens += countText(stripped.text);
++				} else if (output != null) processValue(output, `${path}[${index}].tool_call.output`);
+ 				continue;
+ 			}
++			// builder-librechat: count web search results without their encrypted_content (estimated from length below)
++			if (item.type === "web_search_tool_result" && Array.isArray(item.content) && !hasUnsafeStructuredSerialization(item)) {
++				let blockEncryptedChars = 0;
++				const content = item.content.map((result) => {
++					const stripped = withoutEncryptedContent(result);
++					if (stripped == null) return result;
++					blockEncryptedChars += stripped.encryptedChars;
++					return stripped.rest;
++				});
++				if (blockEncryptedChars > 0) {
++					encryptedChars += blockEncryptedChars;
++					numTokens += getBoundedStructuredTokenCount({
++						...item,
++						content
++					}, countText);
++					continue;
++				}
++			}
++			if (item.type === "web_search_result" && !hasUnsafeStructuredSerialization(item)) {
++				const stripped = withoutEncryptedContent(item);
++				if (stripped != null) {
++					encryptedChars += stripped.encryptedChars;
++					numTokens += getBoundedStructuredTokenCount(stripped.rest, countText);
++					continue;
++				}
++			}
+ 			const nestedValue = item[item.type];
+ 			if (nestedValue == null) {
+ 				numTokens += getBoundedStructuredTokenCount(item, countText);
+@@ -543,12 +610,14 @@ function getTokenCountForMessage(message, getTokenCount, encoding = "o200k_base"
+ 		path: "additional_kwargs.type"
+ 	});
+ 	let numTokens = tokensPerMessage;
++	let encryptedChars = 0;
+ 	const messageType = message.getType();
+ 	if (messageType === "tool" && additionalType?.value === "computer_call_output" && isComputerCallOutputContent(message.content) && typeof message.content === "string") numTokens += Math.ceil(estimateImageBlockTokens({
+ 		type: "computer_screenshot",
+ 		image_url: message.content
+ 	}, encoding) * IMAGE_TOKEN_SAFETY_MARGIN);
+ 	else processValue(message.content, "content");
++	numTokens += encryptedContentTokens(encryptedChars, encoding);
+ 	ensureSafeTokenMeasurement(numTokens, "content");
+ 	const messageRole = message.role;
+ 	if (messageType === "ai" || messageRole === "assistant") {
